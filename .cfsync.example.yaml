@@ -1,0 +1,60 @@
+# cfsync configuration file.
+#
+# Copy this file to ".cfsync.yaml" in the working directory and fill in the
+# values below. cfsync reads "./.cfsync.yaml" by default; use --config to
+# point it at a different path.
+#
+# This file holds no credentials. The Site host, account, and token are read
+# from the environment or a ".env" file (copy ".env.example" to ".env"); see
+# that file for the CFSYNC_HOST, CFSYNC_ACCOUNT, and CFSYNC_TOKEN variables.
+# The work directory is set with the --work-dir flag or the CFSYNC_WORK_DIR
+# environment variable. Setting any of host, account, token, or work_dir here
+# is an error.
+
+# Pages to download. Each entry maps a destination file to the Confluence page
+# or folder to download into it.
+#
+# The key is the destination path relative to work_dir; it must end in ".md"
+# and stay within work_dir. So "test_root/page_1.md" with the work_dir above
+# writes to "pages/test_root/page_1.md".
+#
+# The value is the Confluence path of the page to download, e.g.
+# "/wiki/spaces/TEST/pages/1975222283/Test+Root+Page+1".
+pages:
+  test/root_page_1.md: /wiki/spaces/TEST/pages/1975222283/Root+Page+1
+
+# Folders to sync. Each entry maps a destination directory to the Confluence
+# folder to sync into it.
+#
+# The key is a destination directory relative to work_dir; it must stay within
+# work_dir and must not end in ".md". The folder's pages and sub-folders are
+# mirrored directly under the key — so a page "Main Glossary" in the folder
+# below is listed at "glossary/main_glossary.md". File and directory names are
+# derived from the Confluence titles.
+#
+# The value is the Confluence path of the folder, e.g.
+# "/wiki/spaces/TEST/folder/1614610446".
+folders:
+  glossary: /wiki/spaces/TEST/folder/1614610446
+
+# Spaces to mirror whole. Each entry maps a destination directory to a link to
+# the space root; cfsync pulls every page and folder in the space.
+#
+# The key is a destination directory relative to work_dir; it must stay within
+# work_dir and must not end in ".md". The value is a link to the space root,
+# such as "/wiki/spaces/TEST" (the "/overview" suffix and a full URL are also
+# accepted).
+#
+# The space's page-and-folder tree is mirrored under the key: the space
+# homepage becomes "<key>/_index.md", a page that has children becomes a
+# directory holding its own "_index.md" plus its children, a page without
+# children becomes "<name>.md", and a folder becomes a directory. File and
+# directory names are derived from the Confluence titles.
+#
+# spaces may be combined with pages and folders in one config file, as long as
+# no single Confluence page is claimed by more than one entry: an explicit page
+# that also lives inside a synced space or folder, or two folders where one is
+# nested in the other, reject the whole run. The entry below is commented out
+# only to keep this example's live pull small.
+# spaces:
+#   team-wiki: /wiki/spaces/TEST

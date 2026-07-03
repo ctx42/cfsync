@@ -1,0 +1,107 @@
+# SPDX-FileCopyrightText: (c) 2026 Rafal Zajac
+# SPDX-License-Identifier: MIT
+#
+# Build cross-platform cfsync binaries when a version tag is pushed and attach
+# them to a GitHub release. Each binary is stamped with the tag, commit hash,
+# build date, and a clean working-tree state via the same -ldflags -X variables
+# cmd/install uses (see internal/version), so `cfsync version` names the
+# release. Push a tag like `v1.2.3` to trigger it.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+          - { goos: windows, goarch: arm64 }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Build and archive
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          hash="$(git rev-parse --short=7 HEAD)"
+          date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          pkg="github.com/ctx42/cfsync/internal/version"
+          ldflags="-s -w"
+          ldflags="$ldflags -X ${pkg}.buildRev=${version}"
+          ldflags="$ldflags -X ${pkg}.buildHash=${hash}"
+          ldflags="$ldflags -X ${pkg}.buildDate=${date}"
+          ldflags="$ldflags -X ${pkg}.buildState=clean"
+
+          bin="cfsync"
+          [ "$GOOS" = "windows" ] && bin="cfsync.exe"
+          go build -trimpath -ldflags "$ldflags" -o "$bin" ./cmd/cfsync
+
+          name="cfsync_${version}_${GOOS}_${GOARCH}"
+          mkdir -p dist
+          if [ "$GOOS" = "windows" ]; then
+            zip "dist/${name}.zip" "$bin" README.md LICENSE.md
+          else
+            tar -czf "dist/${name}.tar.gz" "$bin" README.md LICENSE.md
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cfsync_${{ matrix.goos }}_${{ matrix.goarch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            dist/*

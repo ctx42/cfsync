@@ -1,0 +1,12 @@
+# Confluence v2 page-by-id response, rendered per test case. The ADF value is
+# a JSON document embedded as a JSON string, so it is quoted with printf %q.
+bodyType: json
+body: |-
+  {
+    "id": "{{.ID}}",
+    "title": "{{.Title}}",
+    "spaceId": "{{.SpaceID}}",
+    "parentId": "{{.ParentID}}",
+    "version": {"number": {{.Version}}},
+    "body": {"atlas_doc_format": {"value": {{printf "%q" .ADF}}}}
+  }

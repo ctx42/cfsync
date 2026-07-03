@@ -1,0 +1,10 @@
+# A hyphenated word is atomic and is never split at a hyphen.
+meta:
+  width: 20
+  input: |-
+    The state-of-the-art solution wraps text nicely.
+bodyType: text
+body: |-
+  The state-of-the-art
+  solution wraps text
+  nicely.
