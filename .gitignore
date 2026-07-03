@@ -1,0 +1,12 @@
+# IDE
+/.idea/
+
+# Go build artifacts
+/cfsync
+*.exe
+*.test
+*.out
+
+# Go workspace
+go.work
+go.work.sum
