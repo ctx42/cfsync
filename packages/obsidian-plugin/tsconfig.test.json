@@ -1,0 +1,19 @@
+{
+  // Typechecks the plugin test suite, which tsconfig.json excludes ("test/**")
+  // — so `tsc -b` never sees it and vitest only transpiles it. Gives the editor
+  // a config that governs the tests so their `.ts` imports don't spuriously
+  // report TS5097. noEmit only; not part of the composite build (run via
+  // `typecheck:test`).
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "emitDeclarationOnly": false,
+    "sourceMap": false,
+    "noEmit": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

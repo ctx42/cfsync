@@ -1,0 +1,9 @@
+# A width of zero means no limit: collapse to a single line.
+meta:
+  width: 0
+  input: |-
+    Wrap this
+    onto one line please.
+bodyType: text
+body: |-
+  Wrap this onto one line please.

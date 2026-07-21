@@ -1,0 +1,20 @@
+{
+  // Typechecks the CLI's non-live test suite, which tsconfig.json excludes
+  // ("test/**"). The live suites (test/live/) keep their own guard in
+  // tsconfig.livecheck.json; this covers the rest so the editor resolves them
+  // and their `.ts` imports don't spuriously report TS5097. noEmit only; run
+  // via `typecheck:test`.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "emitDeclarationOnly": false,
+    "sourceMap": false,
+    "noEmit": true,
+    "lib": ["ES2022", "DOM"],
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"],
+  "exclude": ["test/live/**"]
+}

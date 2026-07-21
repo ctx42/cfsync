@@ -1,0 +1,25 @@
+{
+  "name": "@cfsync/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "cfsync standalone CLI (Bun): the headless twin of the plugin, for arbitrary directories.",
+  "license": "MIT",
+  "bin": {
+    "cfsync": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -b",
+    "typecheck:live": "tsc --noEmit -p tsconfig.livecheck.json",
+    "typecheck:test": "tsc --noEmit -p tsconfig.test.json",
+    "build": "bun build --compile --outfile=dist/cfsync ./src/index.ts",
+    "test:live": "vitest run --config vitest.live.config.ts"
+  },
+  "dependencies": {
+    "@cfsync/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "yaml": "^2.9.0"
+  }
+}

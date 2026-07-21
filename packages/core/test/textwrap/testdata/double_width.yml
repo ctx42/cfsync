@@ -1,0 +1,9 @@
+# Double-width runes count as two display columns.
+meta:
+  width: 10
+  input: |-
+    こんにちは 世界 foo
+bodyType: text
+body: |-
+  こんにちは
+  世界 foo

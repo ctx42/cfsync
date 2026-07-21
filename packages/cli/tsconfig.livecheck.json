@@ -1,0 +1,19 @@
+{
+  // Typechecks the CLI's test files, which the package's own tsconfig.json
+  // deliberately excludes ("test/**") — so `tsc -b` never checks them. The live
+  // integration suites under test/live/ are excluded from the default `vitest
+  // run` and only execute against a real Site, so this is their sole automated
+  // guard against type rot. Run via the `typecheck:live` script. noEmit only.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "emitDeclarationOnly": false,
+    "sourceMap": false,
+    "noEmit": true,
+    "lib": ["ES2022", "DOM"],
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts", "test/live/**/*.ts"]
+}

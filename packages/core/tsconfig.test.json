@@ -1,0 +1,19 @@
+{
+  // Typechecks the core test suite, which tsconfig.json deliberately excludes
+  // ("test/**") — so `tsc -b` never sees it and vitest only transpiles it.
+  // Without a config that governs the tests, the editor checks them under its
+  // default options, where every `.ts`-suffixed import reports TS5097. noEmit
+  // only; not part of the composite build (run via `typecheck:test`).
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "emitDeclarationOnly": false,
+    "sourceMap": false,
+    "noEmit": true,
+    "lib": ["ES2022"],
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

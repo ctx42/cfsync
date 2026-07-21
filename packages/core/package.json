@@ -1,0 +1,22 @@
+{
+  "name": "@cfsync/core",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Runtime-neutral core: ADF lens, sync orchestration, ports. No node:/bun:/obsidian imports.",
+  "license": "MIT",
+  "exports": {
+    ".": {
+      "types": "./dist/types/index.d.ts",
+      "import": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc -b",
+    "typecheck:test": "tsc --noEmit -p tsconfig.test.json"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1"
+  }
+}

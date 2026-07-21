@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist/types",
+    "tsBuildInfoFile": "dist/.tsbuildinfo",
+    // Plugin runs in Electron/CodeMirror: DOM is available.
+    "lib": ["ES2022", "DOM", "DOM.Iterable"]
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["src/**/*.test.ts", "test/**"],
+  "references": [{ "path": "../core" }]
+}

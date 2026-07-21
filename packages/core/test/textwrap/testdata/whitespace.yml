@@ -1,0 +1,6 @@
+# Input that is only whitespace collapses to an empty string.
+meta:
+  width: 20
+  input: "  \t \n  "
+bodyType: text
+body: ""

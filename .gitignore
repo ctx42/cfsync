@@ -1,0 +1,22 @@
+# Editor / IDE
+.idea/
+.vscode/
+
+# Project temp / build / release
+tmp/
+dist/
+bin/
+
+# Node / Bun / TypeScript toolchain
+node_modules/
+*.tsbuildinfo
+coverage/
+.vitest/
+# bun.lock is committed for reproducible installs.
+
+# OS / editor noise
+.DS_Store
+*~
+*.swp
+*.swo
+/.env

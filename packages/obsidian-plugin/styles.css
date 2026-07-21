@@ -1,0 +1,379 @@
+/* SPDX-FileCopyrightText: (c) 2026 Rafal Zajac */
+/* SPDX-License-Identifier: MIT */
+
+/* cfsync plugin styles. Chip/card styling for ADF carriers lands in M8.4. */
+
+/* Indentation marker (`N> `) rendered as left padding; the nesting level rides
+   in the `--cfsync-indent-level` custom property, set per line by the Live
+   Preview view plugin and per paragraph by the Reading-view post-processor.
+   Scoped to both view containers and given class+element specificity so a
+   theme's default `.cm-line` / `p` rules don't override the padding. */
+.markdown-source-view.mod-cm6 .cm-line.cfsync-indent,
+.markdown-preview-view p.cfsync-indent {
+    padding-left: calc(var(--cfsync-indent-level, 0) * 1.6em);
+}
+
+/* Settings sync-map editor: one entry per row, its two fields stacked and
+   full-width so a long Confluence link is never cramped, each with its own
+   label. Theme-aware via Obsidian's CSS variables. */
+.cfsync-map-row {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4em;
+    padding: 0.75em 0;
+    border-top: 1px solid var(--background-modifier-border);
+}
+/* Label and field on one line; the fixed-width label column makes the path and
+   link line up vertically across both fields and every row. */
+.cfsync-map-field {
+    display: flex;
+    align-items: center;
+    gap: 0.5em;
+}
+.cfsync-map-label {
+    flex: 0 0 6.5em;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+.cfsync-map-input {
+    flex: 1;
+    min-width: 0;
+}
+/* Read-only value shown for a saved entry; long links wrap rather than overflow. */
+.cfsync-map-value {
+    flex: 1;
+    min-width: 0;
+    color: var(--text-normal);
+    word-break: break-word;
+}
+/* Edit/Delete (or Done/Delete) icon buttons, right-aligned on the row. */
+.cfsync-map-controls {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.25em;
+}
+
+.cfsync-path-input {
+    width: 100%;
+    margin-bottom: 0.75em;
+}
+
+/* ── Control-center panel ────────────────────────────────────────────────
+   The pull/push operation surface. Everything is driven by Obsidian's theme
+   variables so it reads correctly in light and dark and adopts the user's
+   accent colour. */
+.cfsync-panel {
+    padding: var(--size-4-3);
+    display: flex;
+    flex-direction: column;
+    gap: var(--size-4-4);
+    font-size: var(--font-ui-small);
+    color: var(--text-normal);
+}
+
+/* Title row: icon in an accent-tinted badge + wordmark. */
+.cfsync-title {
+    display: flex;
+    align-items: center;
+    gap: var(--size-4-2);
+}
+.cfsync-title-ico {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.9em;
+    height: 1.9em;
+    border-radius: var(--radius-m);
+    color: var(--text-on-accent);
+    background: var(--interactive-accent);
+}
+.cfsync-title-ico .svg-icon {
+    width: 1.05em;
+    height: 1.05em;
+}
+.cfsync-title-text {
+    font-size: var(--font-ui-medium);
+    font-weight: var(--font-bold);
+    letter-spacing: 0.01em;
+}
+.cfsync-sub,
+.cfsync-hint {
+    color: var(--text-muted);
+    line-height: 1.4;
+}
+.cfsync-hint {
+    margin-top: calc(-1 * var(--size-4-2));
+}
+
+/* Action groups: a small uppercase label over a row of two equal buttons. */
+.cfsync-group {
+    display: flex;
+    flex-direction: column;
+    gap: var(--size-4-2);
+}
+.cfsync-group-label {
+    font-size: var(--font-ui-smaller);
+    font-weight: var(--font-semibold);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-faint);
+}
+.cfsync-btn-row {
+    display: flex;
+    gap: var(--size-4-2);
+}
+.cfsync-action {
+    flex: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--size-2-2);
+    padding: var(--size-4-2) var(--size-4-2);
+    min-height: 2.4em;
+    border-radius: var(--radius-m);
+    box-shadow: none;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.cfsync-action:hover:not(:disabled) {
+    background: var(--background-modifier-hover);
+}
+.cfsync-action:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+.cfsync-action-ico {
+    display: inline-flex;
+    align-items: center;
+    color: var(--text-muted);
+}
+.cfsync-action-ico .svg-icon {
+    width: 1em;
+    height: 1em;
+}
+/* Push writes to the remote — give it the accent so it reads as the committing
+   action, and tint its icon to match. */
+.cfsync-action.cfsync-push {
+    background: var(--interactive-accent);
+    color: var(--text-on-accent);
+}
+.cfsync-action.cfsync-push:hover:not(:disabled) {
+    background: var(--interactive-accent-hover);
+}
+.cfsync-action.cfsync-push .cfsync-action-ico {
+    color: var(--text-on-accent);
+}
+
+/* Progress: a thin accent bar over a muted caption. */
+.cfsync-progress {
+    display: flex;
+    flex-direction: column;
+    gap: var(--size-4-1);
+}
+.cfsync-bar {
+    position: relative;
+    height: 5px;
+    border-radius: var(--radius-s);
+    background: var(--background-modifier-border);
+    overflow: hidden;
+}
+.cfsync-bar-fill {
+    height: 100%;
+    width: 0;
+    border-radius: inherit;
+    background: var(--interactive-accent);
+    transition: width 0.2s ease;
+}
+.cfsync-bar.is-indeterminate .cfsync-bar-fill {
+    width: 40%;
+    animation: cfsync-indet 1.1s ease-in-out infinite;
+}
+@keyframes cfsync-indet {
+    0% {
+        margin-left: -40%;
+    }
+    100% {
+        margin-left: 100%;
+    }
+}
+.cfsync-caption {
+    display: flex;
+    align-items: baseline;
+    gap: var(--size-4-2);
+    color: var(--text-muted);
+}
+.cfsync-caption-count {
+    font-variant-numeric: tabular-nums;
+    color: var(--text-faint);
+    flex: 0 0 auto;
+}
+.cfsync-caption-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Log: one row per page, a status dot, then the result line. Scrolls on its
+   own so the action buttons stay put. */
+.cfsync-log {
+    display: flex;
+    flex-direction: column;
+    max-height: 40vh;
+    overflow-y: auto;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: var(--radius-m);
+    background: var(--background-secondary);
+}
+.cfsync-row {
+    display: flex;
+    align-items: baseline;
+    gap: var(--size-4-2);
+    padding: var(--size-2-3) var(--size-4-2);
+}
+.cfsync-row + .cfsync-row {
+    border-top: 1px solid var(--background-modifier-border);
+}
+.cfsync-dot {
+    flex: 0 0 auto;
+    width: 7px;
+    height: 7px;
+    margin-top: 0.35em;
+    border-radius: 50%;
+    background: var(--text-faint);
+}
+.cfsync-row-text {
+    font-family: var(--font-monospace);
+    font-size: var(--font-ui-smaller);
+    line-height: 1.5;
+    word-break: break-word;
+}
+.cfsync-info .cfsync-dot {
+    background: var(--color-green);
+}
+.cfsync-warn .cfsync-dot {
+    background: var(--color-yellow);
+}
+.cfsync-err .cfsync-dot {
+    background: var(--color-red);
+}
+.cfsync-err .cfsync-row-text {
+    color: var(--text-error);
+}
+
+/* Footer: count badges. */
+.cfsync-footer {
+    display: flex;
+    gap: var(--size-4-2);
+}
+.cfsync-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--size-2-1);
+    padding: var(--size-2-1) var(--size-4-2);
+    border-radius: var(--radius-s);
+    background: var(--background-secondary);
+    border: 1px solid var(--background-modifier-border);
+    font-variant-numeric: tabular-nums;
+    color: var(--text-muted);
+}
+.cfsync-badge .cfsync-badge-ico {
+    display: inline-flex;
+}
+.cfsync-badge .svg-icon {
+    width: 0.9em;
+    height: 0.9em;
+}
+.cfsync-badge.cfsync-ok {
+    color: var(--color-green);
+}
+.cfsync-badge.cfsync-warn {
+    color: var(--color-yellow);
+}
+.cfsync-badge.cfsync-err {
+    color: var(--color-red);
+}
+
+/* Error banner: a fatal-run notice shown beneath the preserved log, so the
+   pages that already succeeded stay visible. Red inset stripe echoes the
+   preview's error row; box model follows the count badges. */
+.cfsync-error {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--size-4-2);
+    padding: var(--size-4-2);
+    border-radius: var(--radius-m);
+    background: var(--background-secondary);
+    border: 1px solid var(--background-modifier-border);
+    box-shadow: inset 3px 0 0 var(--color-red);
+    color: var(--text-error);
+}
+.cfsync-error-ico {
+    display: inline-flex;
+    flex: 0 0 auto;
+    margin-top: 0.1em;
+    color: var(--color-red);
+}
+.cfsync-error-ico .svg-icon {
+    width: 1em;
+    height: 1em;
+}
+.cfsync-error-text {
+    line-height: 1.4;
+    word-break: break-word;
+}
+
+/* Push preview: selectable rows with the base→remote version delta. */
+.cfsync-preview {
+    display: flex;
+    flex-direction: column;
+    max-height: 55vh;
+    overflow-y: auto;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: var(--radius-m);
+    background: var(--background-secondary);
+}
+.cfsync-prow {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--size-4-2);
+    padding: var(--size-4-2);
+    cursor: pointer;
+}
+.cfsync-prow + .cfsync-prow {
+    border-top: 1px solid var(--background-modifier-border);
+}
+.cfsync-prow:hover {
+    background: var(--background-modifier-hover);
+}
+.cfsync-prow input {
+    margin-top: 0.15em;
+}
+.cfsync-prow-main {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1em;
+    min-width: 0;
+}
+.cfsync-prow-name {
+    font-weight: var(--font-medium);
+    word-break: break-word;
+}
+.cfsync-prow-note {
+    font-size: var(--font-ui-smaller);
+    color: var(--text-muted);
+}
+/* Left accent stripe telegraphs each row's class. */
+.cfsync-prow.cfsync-warn {
+    box-shadow: inset 3px 0 0 var(--color-yellow);
+}
+.cfsync-prow.cfsync-warn .cfsync-prow-note {
+    color: var(--color-yellow);
+}
+.cfsync-prow.cfsync-err {
+    box-shadow: inset 3px 0 0 var(--color-red);
+    opacity: 0.65;
+}
+.cfsync-preview-actions {
+    display: flex;
+    gap: var(--size-4-2);
+}

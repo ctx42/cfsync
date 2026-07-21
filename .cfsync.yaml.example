@@ -1,0 +1,38 @@
+# .cfsync.yaml — what to sync (no secrets here).
+#
+# Copy this file to `.cfsync.yaml` and edit it. It holds only *what* to sync;
+# the Site credentials and the sync root come from the environment or a `.env`
+# file (see `.env.example`), never from here — setting site/account/token/
+# sync_root in this file is an error.
+#
+# cfsync reads `./.cfsync.yaml` by default; use `--config <path>` for another.
+
+# Per-request HTTP timeout, e.g. 45s, 1m30s, 500ms. Omit for the 30s default.
+timeout: 30s
+
+# Markdown output formatting.
+# margin is the column at which block text is hard-wrapped. Omit it or set 0 to
+# leave text unwrapped — the default, since Obsidian soft-wraps in the editor.
+# flavor is the Markdown dialect for pulled/pushed notes. Only "obsidian" is
+# supported today, and it is the default when omitted.
+# markdown:
+#   margin: 80
+#   flavor: obsidian
+
+# Configure at least one of pages / folders / spaces — a config with none has
+# nothing to sync. Each maps a destination under the sync root to a Confluence
+# source. No single page may be claimed by more than one entry.
+
+# Individual pages: destination `.md` file → Confluence page URL/path.
+pages:
+  notes/onboarding.md: /wiki/spaces/TEAM/pages/12345/Onboarding
+
+# Folders: destination directory → Confluence folder. Every page in the folder
+# tree is discovered and pulled under the directory.
+folders:
+  glossary: /wiki/spaces/TEAM/folder/67890
+
+# Spaces: destination directory → Confluence space. Every page in the space is
+# discovered and pulled under the directory.
+spaces:
+  team-wiki: /wiki/spaces/TEAM

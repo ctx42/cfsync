@@ -1,0 +1,12 @@
+# Runs of spaces and newlines collapse to a single space.
+meta:
+  width: 20
+  input: |-
+    Multiple   spaces
+    and
+    newlines   collapse here.
+bodyType: text
+body: |-
+  Multiple spaces and
+  newlines collapse
+  here.

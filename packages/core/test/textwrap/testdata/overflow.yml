@@ -1,0 +1,11 @@
+# A token wider than the limit takes its own line and exceeds the width.
+meta:
+  width: 15
+  input: |-
+    See https://example.com/very/long/path for details now.
+bodyType: text
+body: |-
+  See
+  https://example.com/very/long/path
+  for details
+  now.

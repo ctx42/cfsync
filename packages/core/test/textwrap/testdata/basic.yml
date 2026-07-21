@@ -1,0 +1,11 @@
+# Basic reflow of a plain paragraph at width 20.
+meta:
+  width: 20
+  input: |-
+    The quick brown fox jumps over the lazy dog near the river bank today.
+bodyType: text
+body: |-
+  The quick brown fox
+  jumps over the lazy
+  dog near the river
+  bank today.

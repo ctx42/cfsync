@@ -1,0 +1,26 @@
+{
+  "name": "@cfsync/obsidian-plugin",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "cfsync Obsidian plugin shell: adapters, settings, commands, rendering.",
+  "license": "MIT",
+  "scripts": {
+    "typecheck": "tsc -b",
+    "typecheck:test": "tsc --noEmit -p tsconfig.test.json",
+    "dev": "bun esbuild.config.mjs",
+    "build": "tsc -b && bun esbuild.config.mjs production",
+    "deploy": "bash scripts/deploy-local.sh"
+  },
+  "dependencies": {
+    "@cfsync/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@codemirror/state": "6.5.0",
+    "@codemirror/view": "6.38.6",
+    "@types/node": "^26.1.1",
+    "builtin-modules": "^5.3.0",
+    "esbuild": "^0.28.1",
+    "obsidian": "^1.13.1"
+  }
+}
