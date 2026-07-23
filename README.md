@@ -312,6 +312,28 @@ Under the sync root, `cfsync` manages three reserved locations:
 | `.adf_cache/` | The cached source ADF (`.vN.json`) and the link index (`links.json`). |
 | `_index.md`   | A directory's own page, when a folder or space page has children.     |
 
+### What `cfsync` ignores
+
+Not every file under a mapped root is synced. `cfsync` skips:
+
+- **Non-`.md` files** — only Markdown notes are considered; anything else is
+  left alone.
+- **The `.adf_cache/` directory** — its cached `.md` copies are sync artifacts,
+  never your notes, so the maintenance commands (`push`, `gc`, `clean`) never
+  walk into it.
+- **Notes that aren't managed pages** — a `.md` file with no frontmatter, or
+  whose frontmatter has neither a `page_id` nor a `title`, is not a page
+  `cfsync` owns and is skipped by `push`.
+- **Locally-created notes not yet pushed** — a note marked `cf_local` is
+  excluded everywhere until you create it.
+- **Notes you explicitly hold back** — add `cfsync-plugin: ignore-push` to a
+  note's frontmatter and `push` leaves it out entirely: it is never created,
+  updated, or reported by `status` as having moved. Use it to keep an
+  in-progress or intentionally-local edit out of Confluence without moving or
+  renaming the file. (The marker shares the `cfsync-plugin` key with the
+  managed-note `pull` value, so re-pulling the page rewrites it back to `pull`;
+  re-add `ignore-push` after a pull if you still want it held back.)
+
 > [!TIP]
 > The Obsidian plugin reads and writes the **same `.cfsync.yaml` sync map** —
 > Import one you already have, or Export the map you built in settings to share

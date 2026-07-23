@@ -213,6 +213,10 @@ describe("managedPushDests", () => {
         ); // root page, has id
         await fs.write("/vault/docs/new.md", fm("")); // root create candidate (title only)
         await fs.write("/vault/docs/local.md", fm("cf_local: true\n")); // marked local → skip
+        await fs.write(
+            "/vault/docs/held.md",
+            fm('page_id: "3"\npage_version: 1\ncfsync-plugin: ignore-push\n'),
+        ); // marked ignore-push → skip
         await fs.write("/vault/docs/plain.md", "no frontmatter here"); // unmanaged → skip
 
         expect(await managedPushDests(fs, yaml, cfg)).toEqual([
@@ -260,6 +264,24 @@ describe("managedPushDests", () => {
         );
         const fs = new MemFS();
         await fs.write("/vault/a.md", fm("cf_local: true\n"));
+        expect(await managedPushDests(fs, yaml, cfg)).toEqual([]);
+    });
+
+    it("excludes a configured page marked ignore-push", async () => {
+        const cfg = buildConfig(
+            { pages: { "a.md": "/wiki/spaces/X/pages/1/A" } },
+            {
+                site: "ex",
+                account: "a@ex.com",
+                token: "t",
+                syncRoot: "/vault",
+            },
+        );
+        const fs = new MemFS();
+        await fs.write(
+            "/vault/a.md",
+            fm('page_id: "1"\npage_version: 1\ncfsync-plugin: ignore-push\n'),
+        );
         expect(await managedPushDests(fs, yaml, cfg)).toEqual([]);
     });
 });

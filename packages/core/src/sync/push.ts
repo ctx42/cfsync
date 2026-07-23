@@ -61,6 +61,13 @@ export interface PushMeta {
     local: boolean;
     /** True when the `cfsync-plugin: pull` marker is present: a cfsync-managed note pulled from Confluence. */
     cfsync: boolean;
+    /**
+     * True when the `cfsync-plugin: ignore-push` marker is present: the note is
+     * excluded from push (never created, updated, or reported as movable), even
+     * though it still lives under a managed root. Use it to keep an in-progress
+     * or intentionally-local edit out of Confluence without moving the file.
+     */
+    ignorePush: boolean;
     mentions: Record<string, string>;
     pageImages: PageImage[];
 }
@@ -119,6 +126,7 @@ export function parseMeta(obj: unknown): PushMeta {
         domain: asStr(o["cf_domain"]),
         local: o["cf_local"] === true,
         cfsync: o["cfsync-plugin"] === "pull",
+        ignorePush: o["cfsync-plugin"] === "ignore-push",
         mentions: asStrMap(o["mentions"]),
         pageImages: asArr(o["page_images"]).map((v) => {
             const im = asObj(v);
@@ -232,8 +240,9 @@ export interface PusherDeps {
  * configured folder or space root — unique and sorted. Walking the roots (not
  * just the last pull's link index) is what surfaces a **new** note under a root
  * for creation, alongside the already-managed pages edited in place. A note
- * marked `cf_local` is excluded everywhere; a root file with no frontmatter, or
- * with neither a page id nor a title, is not a managed page and is skipped.
+ * marked `cf_local` or `cfsync-plugin: ignore-push` is excluded everywhere; a
+ * root file with no frontmatter, or with neither a page id nor a title, is not a
+ * managed page and is skipped.
  */
 export async function managedPushDests(
     fs: FileSystem,
@@ -250,10 +259,10 @@ export async function managedPushDests(
         }
     };
 
-    // Configured single pages, minus notes marked local.
+    // Configured single pages, minus notes marked local or ignore-push.
     for (const dest of Object.keys(config.pages)) {
         const meta = await readMeta(cache, fs, yaml, dest);
-        if (meta?.local === true) {
+        if (meta?.local === true || meta?.ignorePush === true) {
             continue;
         }
         add(dest);
@@ -280,7 +289,8 @@ export async function managedPushDests(
 /**
  * pushableFiles keeps the notes among `dests` a push can act on: a managed page
  * (has a `page_id`) or a create candidate (has a `title`). A note marked
- * `cf_local`, or one with no frontmatter at all, is dropped.
+ * `cf_local` or `cfsync-plugin: ignore-push`, or one with no frontmatter at all,
+ * is dropped.
  */
 async function pushableFiles(
     fs: FileSystem,
@@ -291,7 +301,7 @@ async function pushableFiles(
     const out: string[] = [];
     for (const dest of dests) {
         const meta = await readMeta(cache, fs, yaml, dest);
-        if (meta === null || meta.local) {
+        if (meta === null || meta.local || meta.ignorePush) {
             continue;
         }
         if (meta.pageId !== "" || meta.title !== "") {
