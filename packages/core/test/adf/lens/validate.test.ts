@@ -111,12 +111,6 @@ describe("validatePut refusal contract", () => {
             to: "| A | B | C |",
             want: "did not round-trip",
         },
-        {
-            name: "deleting a read-only block",
-            from: "```go\nx := 1\n```",
-            to: "",
-            want: "only paragraph and heading blocks can be deleted",
-        },
     ];
 
     for (const r of rejects) {

@@ -272,8 +272,9 @@ function atLine(err: unknown, line: number): Error {
  * from an edit script that inserts, deletes, keeps or modifies blocks. A kept
  * block is copied from the clone verbatim, a modified one is rebuilt in place, an
  * inserted one is built fresh from its Markdown (see {@link buildBlock}), a
- * deleted one is dropped. The read-only lockdown holds for deletes: only a
- * paragraph or heading may be deleted.
+ * deleted one is dropped. Any rendered block may be deleted, whatever its type —
+ * removing its Markdown removes the node — since a delete only drops a node and
+ * the top-level PutGet law still gates the remaining document.
  *
  * A non-rendered top-level node (one that renders to nothing, such as the empty
  * trailing paragraph Confluence appends) carries no baseline block, so the edit
@@ -357,22 +358,11 @@ function applyStructural(
                 }
                 break;
             }
-            case "delete": {
-                const orig = origins[e.baseIndex];
-                if (
-                    orig !== undefined &&
-                    orig.type !== "paragraph" &&
-                    orig.type !== "heading"
-                ) {
-                    throw new Error(
-                        `push: cannot delete ${orig.type} block ${e.baseIndex}: ` +
-                            "only paragraph and heading blocks can be deleted",
-                    );
-                }
-                // The block is dropped, but its non-rendered anchors are kept.
+            case "delete":
+                // The block is dropped, whatever its type, but its non-rendered
+                // anchors are kept so the rebuild stays lossless.
                 content.push(...(preceding[e.baseIndex] ?? []));
                 break;
-            }
         }
     }
     content.push(...tail);

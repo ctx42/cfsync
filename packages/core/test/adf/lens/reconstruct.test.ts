@@ -385,18 +385,6 @@ describe("put rejects (tabular)", () => {
             edit: (b) => `changed ${b}`,
             want: "cannot express",
         },
-        {
-            name: "deleting a read-only block is rejected",
-            data: `{ "adf": { "type": "doc", "content": [
-               { "type": "paragraph", "attrs": { "localId": "p" },
-                 "content": [ { "type": "text", "text": "keep" } ] },
-               { "type": "table", "attrs": { "localId": "t" }, "content": [
-                  { "type": "tableRow", "content": [
-                     { "type": "tableCell", "content": [ { "type": "paragraph",
-                       "content": [ { "type": "text", "text": "A" } ] } ] } ] } ] } ] } }`,
-            edit: () => "keep",
-            want: "only paragraph and heading blocks can be deleted",
-        },
     ];
 
     for (const tc of cases) {
@@ -430,6 +418,22 @@ describe("put structural", () => {
         const out = put(newADF(twoPara), "alpha", null, null, null);
         expect(texts(out)).toEqual(["alpha"]);
         expect(attrStr(out.doc.content?.[0]?.attrs, "localId")).toBe("p1");
+    });
+
+    it("deletes a non-text block whatever its type", () => {
+        // A paragraph followed by a table; removing the table's Markdown drops
+        // the table node, which the read-only lockdown once forbade.
+        const base = newADF(`{ "adf": { "type": "doc", "content": [
+           { "type": "paragraph", "attrs": { "localId": "p" },
+             "content": [ { "type": "text", "text": "keep" } ] },
+           { "type": "table", "attrs": { "localId": "t" }, "content": [
+              { "type": "tableRow", "content": [
+                 { "type": "tableCell", "content": [ { "type": "paragraph",
+                   "content": [ { "type": "text", "text": "A" } ] } ] } ] } ] } ] } }`);
+        const out = put(base, "keep", null, null, null);
+        expect(out.doc.content?.length).toBe(1);
+        expect(out.doc.content?.[0]?.type).toBe("paragraph");
+        expect(attrStr(out.doc.content?.[0]?.attrs, "localId")).toBe("p");
     });
 
     it("reordering paragraphs swaps them", () => {
