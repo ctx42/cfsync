@@ -96,6 +96,8 @@ export interface PushOutcome {
 export function splitFrontmatter(md: string): {
     frontmatter: string;
     body: string;
+    /** 1-based line in `md` where `body` begins, so a push error can name it. */
+    bodyLine: number;
 } {
     if (!md.startsWith("---\n")) {
         throw new Error("file has no frontmatter");
@@ -106,11 +108,28 @@ export function splitFrontmatter(md: string): {
         throw new Error("file has unterminated frontmatter");
     }
     const frontmatter = rest.slice(0, end + 1);
-    const body = rest
-        .slice(end + "\n---".length)
-        .replace(/^\n+/, "")
-        .replace(/\n+$/, "");
-    return { frontmatter, body };
+    const afterFence = rest.slice(end + "\n---".length);
+    const body = afterFence.replace(/^\n+/, "").replace(/\n+$/, "");
+    const consumed =
+        "---\n".length + end + "\n---".length + skippedLeadingLen(afterFence);
+    const bodyLine = countNewlines(md.slice(0, consumed)) + 1;
+    return { frontmatter, body, bodyLine };
+}
+
+/** skippedLeadingLen is the length of the leading run of newlines stripped from s. */
+function skippedLeadingLen(s: string): number {
+    return s.length - s.replace(/^\n+/, "").length;
+}
+
+/** countNewlines counts the newline characters in s. */
+function countNewlines(s: string): number {
+    let n = 0;
+    for (let i = 0; i < s.length; i++) {
+        if (s.charAt(i) === "\n") {
+            n++;
+        }
+    }
+    return n;
 }
 
 /** parseMeta maps a parsed frontmatter object onto the typed {@link PushMeta}. */
@@ -645,7 +664,7 @@ export class Pusher {
     async pushOne(
         dest: string,
     ): Promise<{ changed: boolean; version: number; warning: string }> {
-        const { meta, body, base } = await loadPushInput(
+        const { meta, body, base, bodyLine } = await loadPushInput(
             this.d.fs,
             this.d.yaml,
             this.d.cacheDir,
@@ -684,6 +703,7 @@ export class Pusher {
                 images: up.images,
                 links,
                 force,
+                bodyLine,
             });
             const docJSON = JSON.stringify(next.doc);
             if (
@@ -709,6 +729,7 @@ export class Pusher {
                 docJSON,
                 this.d.flavor,
                 force,
+                bodyLine,
             );
             await this.d.client.updatePage(
                 meta.pageId,
@@ -907,7 +928,7 @@ export async function loadPushInput(
     cacheDir: string,
     config: Config,
     dest: string,
-): Promise<{ meta: PushMeta; body: string; base: ADF }> {
+): Promise<{ meta: PushMeta; body: string; base: ADF; bodyLine: number }> {
     let edited: string;
     try {
         edited = await fs.readText(dest);
@@ -920,7 +941,7 @@ export async function loadPushInput(
                 "resolve them before pushing",
         );
     }
-    const { frontmatter, body } = splitFrontmatter(edited);
+    const { frontmatter, body, bodyLine } = splitFrontmatter(edited);
     const meta = parseMeta(yaml.parse(frontmatter));
     if (meta.pageId === "" || meta.pageVersion === 0) {
         throw new Error("frontmatter lacks page_id or page_version");
@@ -931,7 +952,7 @@ export async function loadPushInput(
         pageName(config.syncRoot, dest),
         meta.pageVersion,
     );
-    return { meta, body, base };
+    return { meta, body, base, bodyLine };
 }
 
 /** readCache reads and parses the cached ADF wrapper for a page version. */
@@ -968,6 +989,7 @@ async function pushDoc(
     docJSON: string,
     flavor: Flavor,
     force: boolean,
+    bodyLine: number,
 ): Promise<{ docJSON: string; version: number }> {
     const data = await client.fetchPage(meta.pageId);
     if (data.version === meta.pageVersion) {
@@ -983,6 +1005,7 @@ async function pushDoc(
         links,
         flavor,
         force,
+        bodyLine,
     );
 }
 
@@ -1004,6 +1027,7 @@ function mergeOntoLive(
     links: ReturnType<typeof linkMapper>,
     flavor: Flavor,
     force: boolean,
+    bodyLine: number,
 ): { docJSON: string; version: number } {
     const conflict = (detail: string): never => {
         throw new Error(
@@ -1032,7 +1056,7 @@ function mergeOntoLive(
     // its honest message must propagate exactly as it does on the in-sync path.
     let merged: string;
     try {
-        merged = merge3Links(base, live, body, assets, links);
+        merged = merge3Links(base, live, body, assets, links, bodyLine);
     } catch (err) {
         if (err instanceof MergeConflictError) {
             return conflict(message(err));
@@ -1045,6 +1069,7 @@ function mergeOntoLive(
         images,
         links,
         force,
+        bodyLine,
     });
     return { docJSON: JSON.stringify(next.doc), version: live.version + 1 };
 }

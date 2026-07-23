@@ -36,45 +36,52 @@ export class MergeConflictError extends Error {
 interface BlockOp {
     kind: EditKind;
     text: string;
+    /** The side block's source line (0 when the side has none, as for a delete). */
+    line: number;
 }
 
 /** keepOp is the default fate — a block no diff touched. */
-const keepOp: BlockOp = { kind: "keep", text: "" };
+const keepOp: BlockOp = { kind: "keep", text: "", line: 0 };
 
 /**
  * classifyEdits reduces a baseline→side edit script to two lookups: how each
  * baseline block fared (kept/modified/deleted), keyed by baseline index, and the
- * block texts inserted after each anchor baseline block (-1 for the slot before
- * the first block), in document order. Every baseline block appears in the first
- * map, since a diff classifies each exactly once.
+ * blocks inserted after each anchor baseline block (-1 for the slot before the
+ * first block), in document order. Every baseline block appears in the first map,
+ * since a diff classifies each exactly once. Each op and inserted block carries
+ * the side block's source line, so a conflict can be reported by line.
  */
 function classifyEdits(
     edits: Edit[],
     side: MdBlock[],
-): [Map<number, BlockOp>, Map<number, string[]>] {
+): [Map<number, BlockOp>, Map<number, MdBlock[]>] {
     const ofBase = new Map<number, BlockOp>();
-    const insAfter = new Map<number, string[]>();
+    const insAfter = new Map<number, MdBlock[]>();
     let anchor = -1;
     for (const e of edits) {
         switch (e.kind) {
             case "keep":
-                ofBase.set(e.baseIndex, { kind: "keep", text: "" });
+                ofBase.set(e.baseIndex, { kind: "keep", text: "", line: 0 });
                 anchor = e.baseIndex;
                 break;
             case "modify":
                 ofBase.set(e.baseIndex, {
                     kind: "modify",
                     text: side[e.userIndex]?.text ?? "",
+                    line: side[e.userIndex]?.line ?? 0,
                 });
                 anchor = e.baseIndex;
                 break;
             case "delete":
-                ofBase.set(e.baseIndex, { kind: "delete", text: "" });
+                ofBase.set(e.baseIndex, { kind: "delete", text: "", line: 0 });
                 anchor = e.baseIndex;
                 break;
             case "insert": {
                 const arr = insAfter.get(anchor) ?? [];
-                arr.push(side[e.userIndex]?.text ?? "");
+                const blk = side[e.userIndex];
+                if (blk !== undefined) {
+                    arr.push(blk);
+                }
                 insAfter.set(anchor, arr);
                 break;
             }
@@ -114,6 +121,7 @@ export function merge3Links(
     body: string,
     assets: Record<string, string> | null,
     links: Links | null,
+    bodyLine = 1,
 ): string {
     const base = assets ?? {};
     const [baseBlocks] = baselineBlocks(adf, base, links);
@@ -140,13 +148,14 @@ export function merge3Links(
             // genuinely disagree and cannot be ordered, so it is a conflict.
             if (!sameInserts(l, r)) {
                 throw new MergeConflictError(
-                    ": both sides inserted a block at the same place",
+                    `${atLine(l[0]?.line ?? 0, bodyLine)}: both sides ` +
+                        "inserted a block at the same place",
                 );
             }
-            out.push(...l);
+            out.push(...l.map((b) => b.text));
             return;
         }
-        out.push(...l, ...r);
+        out.push(...l.map((b) => b.text), ...r.map((b) => b.text));
     };
 
     emitInserts(-1);
@@ -160,6 +169,7 @@ export function merge3Links(
             localOf.get(bi) ?? keepOp,
             remoteOf.get(bi) ?? keepOp,
             bi,
+            bodyLine,
         );
         if (keep) {
             out.push(text);
@@ -170,16 +180,25 @@ export function merge3Links(
 }
 
 /**
+ * atLine renders a ` (line N)` suffix for a conflict message from a local block's
+ * source line and the body's file offset, or "" when the local side has no block
+ * at that spot (a delete, or a remote-only insert) and thus no file line to name.
+ */
+function atLine(line: number, bodyLine: number): string {
+    return line > 0 ? ` (line ${bodyLine + line - 1})` : "";
+}
+
+/**
  * sameInserts reports whether two sides inserted the same run of blocks at one
  * anchor: equal count and each pair equal after normalization, so a difference
  * of pure layout (soft-wrap) still counts as the same insert.
  */
-function sameInserts(l: string[], r: string[]): boolean {
+function sameInserts(l: MdBlock[], r: MdBlock[]): boolean {
     if (l.length !== r.length) {
         return false;
     }
     return l.every(
-        (text, i) => normalizeBlock(text) === normalizeBlock(r[i] ?? ""),
+        (b, i) => normalizeBlock(b.text) === normalizeBlock(r[i]?.text ?? ""),
     );
 }
 
@@ -196,6 +215,7 @@ function mergeBlock(
     lo: BlockOp,
     ro: BlockOp,
     bi: number,
+    bodyLine: number,
 ): [string, boolean] {
     const lChanged = lo.kind === "modify" || lo.kind === "delete";
     const rChanged = ro.kind === "modify" || ro.kind === "delete";
@@ -219,6 +239,7 @@ function mergeBlock(
         return ["", false]; // deleted on both sides
     }
     throw new MergeConflictError(
-        ` at block ${bi}: edited both locally and remotely`,
+        ` at block ${bi}${atLine(lo.line, bodyLine)}: ` +
+            "edited both locally and remotely",
     );
 }

@@ -30,6 +30,12 @@ export interface ReconstructOpts {
     links: Links | null;
     /** Re-derive every editable block from its Markdown even when unedited. */
     force?: boolean;
+    /**
+     * 1-based line in the source file where `body` begins (just after the
+     * frontmatter). A back-port refusal names the offending block's file line by
+     * adding it to the block's body-relative line. Defaults to 1.
+     */
+    bodyLine?: number;
 }
 
 /**

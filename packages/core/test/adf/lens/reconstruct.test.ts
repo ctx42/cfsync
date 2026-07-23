@@ -1356,12 +1356,269 @@ describe("put table", () => {
         expect(md).toContain("`adf:@Jane Doe`");
     });
 
-    it("changing the column count is rejected", () => {
+    it("a ragged edit (rows of differing widths) is rejected", () => {
         const base = newADF(headerRow);
+        // Only the data row gains a cell, so the table is no longer rectangular.
         const body = renderBody(base).replace("| one ", "| one | x ");
+        expect(() => put(base, body, null, null, null)).toThrow(
+            "differing column counts",
+        );
+    });
+
+    it("appending a column adds a cell to every row", () => {
+        const base = newADF(headerRow);
+        const body = renderBody(base)
+            .split("\n")
+            .map((ln, i) => {
+                if (i === 1) {
+                    return `${ln}---|`; // separator gains a column
+                }
+                return ln.replace(/\|\s*$/, `| ${i === 0 ? "Extra" : "x"} |`);
+            })
+            .join("\n");
+        const out = put(base, body, null, null, null);
+        const t = out.doc.content?.[0];
+        expect(t?.content?.[0]?.content?.length).toBe(3);
+        // The new header-row cell is a tableHeader, so the row stays all-header.
+        expect(cell(out, 0, 2)?.type).toBe("tableHeader");
+        expect(cell(out, 0, 2)?.content?.[0]?.content?.[0]?.text).toBe("Extra");
+        expect(cell(out, 1, 2)?.type).toBe("tableCell");
+        expect(cell(out, 1, 2)?.content?.[0]?.content?.[0]?.text).toBe("x");
+        // The kept cells keep their localId.
+        expect(attrStr(cell(out, 1, 0)?.attrs, "localId")).toBe("c1");
+    });
+
+    it("deleting a column drops that cell from every row", () => {
+        const base = newADF(headerRow);
+        // Keep only the first column of each row.
+        const body = renderBody(base)
+            .split("\n")
+            .map((ln, i) => {
+                if (i === 1) {
+                    return "|---|";
+                }
+                const first = ln.split("|").filter((x) => x !== "")[0] ?? "";
+                return `| ${first.trim()} |`;
+            })
+            .join("\n");
+        const out = put(base, body, null, null, null);
+        expect(out.doc.content?.[0]?.content?.[0]?.content?.length).toBe(1);
+        expect(cell(out, 0, 0)?.content?.[0]?.content?.[0]?.text).toBe("Key");
+        expect(cell(out, 1, 0)?.content?.[0]?.content?.[0]?.text).toBe("one");
+        expect(attrStr(cell(out, 1, 0)?.attrs, "localId")).toBe("c1");
+    });
+
+    it("changing the column count of a spanned table is rejected", () => {
+        const base = newADF(`{ "adf": { "type": "doc", "content": [
+           { "type": "table", "attrs": { "localId": "t" }, "content": [
+              { "type": "tableRow", "content": [
+                 { "type": "tableCell", "attrs": { "colspan": 2 },
+                   "content": [ { "type": "paragraph",
+                     "content": [ { "type": "text", "text": "wide" } ] } ] } ] },
+              { "type": "tableRow", "content": [
+                 { "type": "tableCell", "content": [ { "type": "paragraph",
+                   "content": [ { "type": "text", "text": "l" } ] } ] },
+                 { "type": "tableCell", "content": [ { "type": "paragraph",
+                   "content": [ { "type": "text", "text": "r" } ] } ] } ] } ] } ] } }`);
+        const body = renderBody(base)
+            .split("\n")
+            .map((ln, i) =>
+                i === 1 ? `${ln}---|` : ln.replace(/\|\s*$/, "| z |"),
+            )
+            .join("\n");
         expect(() => put(base, body, null, null, null)).toThrow(
             "number of table columns",
         );
+    });
+
+    it("adds a row and a column in the same push", () => {
+        const base = newADF(headerRow);
+        // Widen every row with a new column, then append a whole new row.
+        const body = `${renderBody(base)
+            .split("\n")
+            .map((ln, i) =>
+                i === 1
+                    ? `${ln}---|`
+                    : ln.replace(/\|\s*$/, `| ${i === 0 ? "Extra" : "9"} |`),
+            )
+            .join("\n")}\n| p | q | r |`;
+        const out = put(base, body, null, null, null);
+        const t = out.doc.content?.[0];
+        expect(t?.content?.length).toBe(3); // header + two data rows
+        expect(t?.content?.[0]?.content?.length).toBe(3); // three columns
+        // The new column's header stays a tableHeader; the original data cell
+        // keeps its localId; the appended row and cell are fresh.
+        expect(cell(out, 0, 2)?.type).toBe("tableHeader");
+        expect(cell(out, 0, 2)?.content?.[0]?.content?.[0]?.text).toBe("Extra");
+        expect(attrStr(cell(out, 1, 0)?.attrs, "localId")).toBe("c1");
+        expect(cell(out, 1, 2)?.content?.[0]?.content?.[0]?.text).toBe("9");
+        expect(cell(out, 2, 0)?.type).toBe("tableCell");
+        expect(cell(out, 2, 2)?.content?.[0]?.content?.[0]?.text).toBe("r");
+    });
+
+    it("removes a row and a column in the same push, keeping a survivor's localId", () => {
+        const base = newADF(`{ "adf": { "type": "doc", "content": [
+           { "type": "table", "attrs": { "localId": "t" }, "content": [
+              { "type": "tableRow", "content": [
+                 { "type": "tableHeader", "content": [ { "type": "paragraph",
+                   "content": [ { "type": "text", "text": "A" } ] } ] },
+                 { "type": "tableHeader", "content": [ { "type": "paragraph",
+                   "content": [ { "type": "text", "text": "B" } ] } ] },
+                 { "type": "tableHeader", "content": [ { "type": "paragraph",
+                   "content": [ { "type": "text", "text": "C" } ] } ] } ] },
+              { "type": "tableRow", "content": [
+                 { "type": "tableCell", "attrs": { "localId": "keep" },
+                   "content": [ { "type": "paragraph",
+                     "content": [ { "type": "text", "text": "1" } ] } ] },
+                 { "type": "tableCell", "content": [ { "type": "paragraph",
+                   "content": [ { "type": "text", "text": "2" } ] } ] },
+                 { "type": "tableCell", "content": [ { "type": "paragraph",
+                   "content": [ { "type": "text", "text": "3" } ] } ] } ] },
+              { "type": "tableRow", "content": [
+                 { "type": "tableCell", "content": [ { "type": "paragraph",
+                   "content": [ { "type": "text", "text": "4" } ] } ] },
+                 { "type": "tableCell", "content": [ { "type": "paragraph",
+                   "content": [ { "type": "text", "text": "5" } ] } ] },
+                 { "type": "tableCell", "content": [ { "type": "paragraph",
+                   "content": [ { "type": "text", "text": "6" } ] } ] } ] } ] } ] } }`);
+        // Keep only columns A and C, and the header plus the first data row.
+        const out = put(
+            base,
+            "| A | C |\n|---|---|\n| 1 | 3 |",
+            null,
+            null,
+            null,
+        );
+        const t = out.doc.content?.[0];
+        expect(t?.content?.length).toBe(2);
+        expect(t?.content?.[0]?.content?.length).toBe(2);
+        expect(cell(out, 0, 0)?.content?.[0]?.content?.[0]?.text).toBe("A");
+        expect(cell(out, 0, 1)?.content?.[0]?.content?.[0]?.text).toBe("C");
+        // Column B and the second data row are gone; the kept cell keeps its id.
+        expect(cell(out, 1, 0)?.content?.[0]?.content?.[0]?.text).toBe("1");
+        expect(cell(out, 1, 1)?.content?.[0]?.content?.[0]?.text).toBe("3");
+        expect(attrStr(cell(out, 1, 0)?.attrs, "localId")).toBe("keep");
+    });
+
+    it("names the file line of a refused block", () => {
+        const base = newADF(headerRow); // the table is the first body block
+        // A ragged edit is refused; the message names the block's line.
+        const ragged = renderBody(base).replace("| one ", "| one | x ");
+        expect(() => put(base, ragged, null, null, null)).toThrow("(line 1)");
+        // With a bodyLine offset (as after frontmatter), the reported line shifts.
+        expect(() =>
+            putLinks(base, ragged, null, null, null, null, false, 42),
+        ).toThrow("(line 42)");
+    });
+
+    it("appending a data row inserts a fresh tableRow", () => {
+        const base = newADF(headerRow);
+        const out = put(
+            base,
+            `${renderBody(base)}\n| aaa | bbb |`,
+            null,
+            null,
+            null,
+        );
+        const rows = out.doc.content?.[0]?.content ?? [];
+        expect(rows.length).toBe(3);
+        const added = rows[2];
+        expect(added?.content?.[0]?.type).toBe("tableCell");
+        expect(added?.content?.[0]?.content?.[0]?.content?.[0]?.text).toBe(
+            "aaa",
+        );
+        expect(added?.content?.[1]?.content?.[0]?.content?.[0]?.text).toBe(
+            "bbb",
+        );
+        // The appended cell carries no localId; Confluence assigns one on save.
+        expect(attrStr(added?.content?.[0]?.attrs, "localId")).toBe("");
+    });
+
+    it("deleting a data row drops that tableRow", () => {
+        const base = newADF(headerRow);
+        const body = renderBody(base)
+            .split("\n")
+            .filter((ln) => !ln.includes("one"))
+            .join("\n");
+        const out = put(base, body, null, null, null);
+        const rows = out.doc.content?.[0]?.content ?? [];
+        expect(rows.length).toBe(1);
+        expect(cell(out, 0, 0)?.content?.[0]?.content?.[0]?.text).toBe("Key");
+    });
+
+    it("inserting a row mid-table keeps the surrounding rows' localIds", () => {
+        const base = newADF(`{ "adf": { "type": "doc", "content": [
+           { "type": "table", "attrs": { "localId": "t" }, "content": [
+              { "type": "tableRow", "content": [
+                 { "type": "tableHeader", "content": [ { "type": "paragraph",
+                   "content": [ { "type": "text", "text": "K" } ] } ] },
+                 { "type": "tableHeader", "content": [ { "type": "paragraph",
+                   "content": [ { "type": "text", "text": "V" } ] } ] } ] },
+              { "type": "tableRow", "content": [
+                 { "type": "tableCell", "attrs": { "localId": "a" },
+                   "content": [ { "type": "paragraph",
+                     "content": [ { "type": "text", "text": "a" } ] } ] },
+                 { "type": "tableCell", "content": [ { "type": "paragraph",
+                   "content": [ { "type": "text", "text": "1" } ] } ] } ] },
+              { "type": "tableRow", "content": [
+                 { "type": "tableCell", "attrs": { "localId": "b" },
+                   "content": [ { "type": "paragraph",
+                     "content": [ { "type": "text", "text": "b" } ] } ] },
+                 { "type": "tableCell", "content": [ { "type": "paragraph",
+                   "content": [ { "type": "text", "text": "2" } ] } ] } ] } ] } ] } }`);
+        const lines = renderBody(base).split("\n"); // header, sep, a|1, b|2
+        lines.splice(3, 0, "| NEW | 9 |"); // between a|1 and b|2
+        const out = put(base, lines.join("\n"), null, null, null);
+        const rows = out.doc.content?.[0]?.content ?? [];
+        expect(rows.length).toBe(4);
+        expect(cell(out, 2, 0)?.content?.[0]?.content?.[0]?.text).toBe("NEW");
+        expect(attrStr(cell(out, 1, 0)?.attrs, "localId")).toBe("a");
+        expect(attrStr(cell(out, 3, 0)?.attrs, "localId")).toBe("b");
+    });
+
+    it("a new row in a key/value table gets a tableHeader first cell", () => {
+        const base = newADF(`{ "adf": { "type": "doc", "content": [
+           { "type": "table", "attrs": { "localId": "t" }, "content": [
+              { "type": "tableRow", "content": [
+                 { "type": "tableHeader", "content": [ { "type": "paragraph",
+                   "content": [ { "type": "text", "text": "K1" } ] } ] },
+                 { "type": "tableCell", "content": [ { "type": "paragraph",
+                   "content": [ { "type": "text", "text": "v1" } ] } ] } ] } ] } ] } }`);
+        // The header column renders bolded, so the inserted row's key is **K2**.
+        const out = put(
+            base,
+            `${renderBody(base)}\n| **K2** | v2 |`,
+            null,
+            null,
+            null,
+        );
+        const added = out.doc.content?.[0]?.content?.[1];
+        expect(added?.content?.[0]?.type).toBe("tableHeader");
+        // The wrapping bold is stripped; the render re-bolds it, so it round-trips.
+        expect(added?.content?.[0]?.content?.[0]?.content?.[0]?.text).toBe(
+            "K2",
+        );
+        expect(added?.content?.[1]?.type).toBe("tableCell");
+        expect(added?.content?.[1]?.content?.[0]?.content?.[0]?.text).toBe(
+            "v2",
+        );
+    });
+
+    it("changing the row count of a spanned table is rejected", () => {
+        const base = newADF(`{ "adf": { "type": "doc", "content": [
+           { "type": "table", "attrs": { "localId": "t" }, "content": [
+              { "type": "tableRow", "content": [
+                 { "type": "tableCell", "attrs": { "colspan": 2 },
+                   "content": [ { "type": "paragraph",
+                     "content": [ { "type": "text", "text": "wide" } ] } ] } ] },
+              { "type": "tableRow", "content": [
+                 { "type": "tableCell", "content": [ { "type": "paragraph",
+                   "content": [ { "type": "text", "text": "l" } ] } ] },
+                 { "type": "tableCell", "content": [ { "type": "paragraph",
+                   "content": [ { "type": "text", "text": "r" } ] } ] } ] } ] } ] } }`);
+        expect(() =>
+            put(base, `${renderBody(base)}\n| x | y |`, null, null, null),
+        ).toThrow("number of table rows");
     });
 });
 

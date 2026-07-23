@@ -7,7 +7,11 @@
 // with instanceof.
 
 import { describe, expect, it } from "vitest";
-import { MergeConflictError, merge3 } from "../../../src/adf/lens/merge.ts";
+import {
+    MergeConflictError,
+    merge3,
+    merge3Links,
+} from "../../../src/adf/lens/merge.ts";
 import { put } from "../../../src/adf/lens/reconstruct.ts";
 import { marshallMarkdownMapped } from "../../../src/index.ts";
 import { type ADF, attrStr, newADF } from "../../../src/models/adf.ts";
@@ -63,6 +67,30 @@ describe("merge3", () => {
         }
         expect(err).toBeInstanceOf(MergeConflictError);
         expect((err as Error).message).toContain("merge conflict at block 0");
+        // The conflicting block is the first body line.
+        expect((err as Error).message).toContain("(line 1)");
+    });
+
+    it("names the file line of a conflicting block", () => {
+        // A three-paragraph doc: block 2 renders on body line 5 (blank-separated).
+        const base = doc("alpha", "beta");
+        const three = newADF(`{ "adf": { "type": "doc", "content": [
+           { "type": "paragraph", "attrs": { "localId": "p1" },
+             "content": [ { "type": "text", "text": "alpha" } ] },
+           { "type": "paragraph", "attrs": { "localId": "p2" },
+             "content": [ { "type": "text", "text": "beta" } ] } ] } }`);
+        // Conflict the second block (body line 3); with a bodyLine of 13 (as after
+        // an 11-line frontmatter plus a blank), that is file line 15.
+        const remote = doc("alpha", "beta remote");
+        const local = renderBody(three).replace("beta", "beta local");
+        let err: unknown;
+        try {
+            merge3Links(base, remote, local, null, null, 13);
+        } catch (e) {
+            err = e;
+        }
+        expect(err).toBeInstanceOf(MergeConflictError);
+        expect((err as Error).message).toContain("at block 1 (line 15)");
     });
 
     it("a local insert lands alongside a remote edit", () => {

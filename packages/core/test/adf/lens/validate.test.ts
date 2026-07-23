@@ -101,10 +101,15 @@ describe("validatePut refusal contract", () => {
         want: string;
     }> = [
         {
-            name: "adding a table column",
+            // `mixed`'s table has no header row, so it renders under a blank
+            // synthetic header. Widening only the data row leaves that header at
+            // its old width, so the rebuilt 3-column table no longer re-renders to
+            // the edited body: PutGet refuses the inconsistent edit. (A consistent
+            // column add — every row widened — is supported; see reconstruct.test.)
+            name: "widening only one row of a table",
             from: "| A | B |",
             to: "| A | B | C |",
-            want: "number of table columns",
+            want: "did not round-trip",
         },
         {
             name: "deleting a read-only block",

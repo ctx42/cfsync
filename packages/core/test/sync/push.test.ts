@@ -152,6 +152,7 @@ describe("splitFrontmatter", () => {
         expect(splitFrontmatter("---\ntitle: X\n---\n\nhello\n")).toEqual({
             frontmatter: "title: X\n",
             body: "hello",
+            bodyLine: 5, // "hello" is the 5th line of the file
         });
     });
     it("rejects a file with no frontmatter", () => {

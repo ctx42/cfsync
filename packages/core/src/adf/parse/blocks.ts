@@ -23,11 +23,17 @@ export interface MdBlock {
     text: string;
     /** The whitespace-normalized form of `text`, used for equality. */
     key: string;
+    /**
+     * 1-based line where the block starts in the body it was segmented from.
+     * {@link segmentBody} sets it; a synthetic block (a re-rendered baseline row,
+     * list item, etc.) has no source position and defaults to 1.
+     */
+    line: number;
 }
 
-/** newBlock builds an {@link MdBlock} from raw block text. */
-export function newBlock(text: string): MdBlock {
-    return { text, key: normalizeBlock(text) };
+/** newBlock builds an {@link MdBlock} from raw block text at an optional line. */
+export function newBlock(text: string, line = 1): MdBlock {
+    return { text, key: normalizeBlock(text), line };
 }
 
 /**
@@ -173,18 +179,29 @@ export function segmentBody(body: string): MdBlock[] {
     const lines = body.split("\n");
     const blocks: MdBlock[] = [];
     let cur: string[] = [];
+    let curStart = 1; // 1-based body line of cur[0]
     let inFence = false;
     let inList = false;
 
+    // push records the block's start line the moment cur becomes non-empty.
+    const push = (i: number, ln: string): void => {
+        if (cur.length === 0) {
+            curStart = i + 1;
+        }
+        cur.push(ln);
+    };
+
     const flush = (): void => {
+        let start = curStart;
         while (cur.length > 0 && isBlankLine(cur[0] ?? "")) {
             cur = cur.slice(1);
+            start++; // a trimmed leading blank shifts the start down
         }
         while (cur.length > 0 && isBlankLine(cur[cur.length - 1] ?? "")) {
             cur = cur.slice(0, -1);
         }
         if (cur.length > 0) {
-            blocks.push(newBlock(cur.join("\n")));
+            blocks.push(newBlock(cur.join("\n"), start));
         }
         cur = [];
         inList = false;
@@ -194,16 +211,16 @@ export function segmentBody(body: string): MdBlock[] {
         const ln = lines[i] ?? "";
         if (isFenceLine(ln)) {
             inFence = !inFence;
-            cur.push(ln);
+            push(i, ln);
             continue;
         }
         if (inFence) {
-            cur.push(ln);
+            push(i, ln);
             continue;
         }
         if (isBlankLine(ln)) {
             if (inList && listContinues(lines, i)) {
-                cur.push(ln); // internal blank of a loose list
+                push(i, ln); // internal blank of a loose list
                 continue;
             }
             flush();
@@ -212,7 +229,7 @@ export function segmentBody(body: string): MdBlock[] {
         if (cur.length === 0 && isListStart(ln)) {
             inList = true;
         }
-        cur.push(ln);
+        push(i, ln);
     }
     flush();
     return blocks;

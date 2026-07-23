@@ -21,5 +21,6 @@ export const obsidianFlavor: Flavor = {
             o.images,
             o.links,
             o.force ?? false,
+            o.bodyLine ?? 1,
         ),
 };

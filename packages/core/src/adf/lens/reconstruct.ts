@@ -45,7 +45,12 @@ import {
     listItemBody,
     type MdCtx,
 } from "../render/markdown.ts";
-import { buildTableGrid, rowAllHeader, spanMarker } from "../render/table.ts";
+import {
+    buildTableGrid,
+    escapeTableCell,
+    rowAllHeader,
+    spanMarker,
+} from "../render/table.ts";
 import { buildBlock, healAdfCodeBlock } from "./build.ts";
 import { diffBlocks, type Edit } from "./diff.ts";
 import { baselineBlocks, type Origin } from "./sourcemap.ts";
@@ -107,6 +112,11 @@ export function put(
  * a link href re-resolved through `links` — reaches the push even for an
  * unedited block; a non-editable block (a macro, a read-only node) is still kept
  * verbatim rather than rejected. Defaults to `false`, the ordinary push path.
+ *
+ * `bodyLine` is the 1-based line in the source file where `body` begins (just
+ * after the frontmatter); a refusal names the offending block's file line by
+ * adding it to the block's body-relative line. It defaults to 1, so a caller that
+ * passes only a body reports body-relative lines.
  */
 export function putLinks(
     adf: ADF,
@@ -116,6 +126,7 @@ export function putLinks(
     images: NewImage[] | null,
     links: Links | null,
     force = false,
+    bodyLine = 1,
 ): ADF {
     const pc: ParseCtx = { mentions: mentions ?? {}, links };
     const base = assets ?? {};
@@ -154,9 +165,10 @@ export function putLinks(
             pc,
             imgByTarget,
             force,
+            bodyLine,
         );
     } else {
-        applyInPlace(out, origins, userBlocks, edits, ctx, pc, force);
+        applyInPlace(out, origins, userBlocks, edits, ctx, pc, force, bodyLine);
     }
 
     validatePut(out, baseBlocks, userBlocks, edits, full, links);
@@ -218,6 +230,7 @@ function applyInPlace(
     ctx: MdCtx,
     pc: ParseCtx,
     force: boolean,
+    bodyLine: number,
 ): void {
     const content = out.doc.content ?? [];
     for (const e of edits) {
@@ -229,12 +242,29 @@ function applyInPlace(
         }
         const orig = origins[e.baseIndex];
         const node = orig === undefined ? undefined : content[orig.nodeIndex];
-        const txt = userBlocks[e.userIndex]?.text;
-        if (orig === undefined || node === undefined || txt === undefined) {
+        const ub = userBlocks[e.userIndex];
+        if (orig === undefined || node === undefined || ub === undefined) {
             continue;
         }
-        editBlock(node, orig, e.baseIndex, txt, ctx, pc, force);
+        try {
+            editBlock(node, orig, e.baseIndex, ub.text, ctx, pc, force);
+        } catch (err) {
+            throw atLine(err, bodyLine + ub.line - 1);
+        }
     }
+}
+
+/**
+ * atLine returns err with ` (line N)` appended to its message, so a block-level
+ * refusal names where in the source file the offending block sits. It is a no-op
+ * when the message already carries a line, so a nested refusal is annotated once.
+ */
+function atLine(err: unknown, line: number): Error {
+    const msg = errMessage(err);
+    if (/\(line \d+\)/.test(msg)) {
+        return err instanceof Error ? err : new Error(msg);
+    }
+    return new Error(`${msg} (line ${line})`);
 }
 
 /**
@@ -262,9 +292,12 @@ function applyStructural(
     pc: ParseCtx,
     images: Record<string, NewImage>,
     force: boolean,
+    bodyLine: number,
 ): void {
     const source = out.doc.content ?? [];
     const [preceding, tail] = nonRenderedGroups(source, origins);
+    const fileLine = (userIndex: number): number =>
+        bodyLine + (userBlocks[userIndex]?.line ?? 1) - 1;
 
     const content: Node[] = [];
     for (const e of edits) {
@@ -277,7 +310,19 @@ function applyStructural(
                 if (node !== undefined) {
                     const txt = userBlocks[e.userIndex]?.text;
                     if (force && orig !== undefined && txt !== undefined) {
-                        editBlock(node, orig, e.baseIndex, txt, ctx, pc, force);
+                        try {
+                            editBlock(
+                                node,
+                                orig,
+                                e.baseIndex,
+                                txt,
+                                ctx,
+                                pc,
+                                force,
+                            );
+                        } catch (err) {
+                            throw atLine(err, fileLine(e.userIndex));
+                        }
                     }
                     content.push(node);
                 }
@@ -294,14 +339,22 @@ function applyStructural(
                     node !== undefined &&
                     txt !== undefined
                 ) {
-                    editBlock(node, orig, e.baseIndex, txt, ctx, pc, force);
+                    try {
+                        editBlock(node, orig, e.baseIndex, txt, ctx, pc, force);
+                    } catch (err) {
+                        throw atLine(err, fileLine(e.userIndex));
+                    }
                     content.push(node);
                 }
                 break;
             }
             case "insert": {
                 const txt = userBlocks[e.userIndex]?.text ?? "";
-                content.push(buildBlock(txt, e.userIndex, pc, images));
+                try {
+                    content.push(buildBlock(txt, e.userIndex, pc, images));
+                } catch (err) {
+                    throw atLine(err, fileLine(e.userIndex));
+                }
                 break;
             }
             case "delete": {
@@ -1182,13 +1235,17 @@ function rebuildBlockquote(
 }
 
 /**
- * rebuildTable back-ports edits into a table cell by cell. The table's shape — its
- * rows, columns, colspans, rowspans and which cells are headers — is structure and
- * stays frozen; only the text inside a cell is editable. It re-derives the same
- * rendered grid the render produced (see {@link buildTableGrid}), parses the
- * user's edited Markdown table back into the same grid, and for every cell whose
- * rendered value changed rebuilds that cell's paragraph in place. A changed cell
- * that is not a single editable paragraph is rejected. Because the render is lossy
+ * rebuildTable back-ports edits into a table. Its colspans, rowspans and which
+ * cells are headers stay frozen; cell text is editable, and — for a span-free
+ * table — rows and columns may also be added or removed, in the same push. It
+ * re-derives the same rendered grid the render produced (see
+ * {@link buildTableGrid}), parses the user's edited Markdown table back into a
+ * grid, and when neither count changed rebuilds each changed cell's paragraph in
+ * place ({@link editTableCellsInPlace}). When a count differs a span-free table is
+ * re-aligned by {@link rebuildTableGrid}, so a row or column may be kept, edited,
+ * inserted or deleted; a table with any cell span keeps both counts frozen, as a
+ * span breaks the 1:1 grid-to-cell mapping the alignment needs, and a ragged edit
+ * (rows of differing widths) is rejected as malformed. Because the render is lossy
  * in several ways — header-column cells are bolded, a blank synthetic header and
  * its separator are injected, and colspan/rowspan-covered positions show the `«`
  * span marker — the reverse parse cannot be perfect in every case; the top-level
@@ -1223,20 +1280,63 @@ function rebuildTable(
     if (!headerRow) {
         userGrid = userGrid.slice(1);
     }
-    if (userGrid.length !== rows) {
-        throw new Error(
-            `push: cannot change the number of table rows ` +
-                `(have ${userGrid.length}, want ${rows})`,
-        );
-    }
+    // A Markdown table is rectangular: every row carries the same cell count. A
+    // ragged edit is malformed, not an add/remove, so reject it before diffing.
+    const userRows = userGrid.length;
+    const userCols = userGrid[0]?.length ?? 0;
     for (const ur of userGrid) {
-        if (ur.length !== cols) {
-            throw new Error("push: cannot change the number of table columns");
+        if (ur.length !== userCols) {
+            throw new Error("push: table rows have differing column counts");
         }
     }
 
-    // Walk the cells in document order, tracking each origin's grid position
-    // exactly as buildTableGrid does, and rebuild the ones the user changed.
+    const rowsDiffer = userRows !== rows;
+    const colsDiffer = userCols !== cols;
+    if (!rowsDiffer && !colsDiffer) {
+        editTableCellsInPlace(
+            node,
+            gridText,
+            gridHead,
+            headerRow,
+            userGrid,
+            ctx,
+            pc,
+            force,
+        );
+        return;
+    }
+
+    // A cell span makes the grid no longer map 1:1 to the tableRow/cell layout,
+    // so which row or column was added or removed is ambiguous; freeze the count.
+    if (tableHasSpans(node)) {
+        if (colsDiffer) {
+            throw new Error("push: cannot change the number of table columns");
+        }
+        throw new Error(
+            `push: cannot change the number of table rows ` +
+                `(have ${userRows}, want ${rows})`,
+        );
+    }
+    rebuildTableGrid(node, gridText, gridHead, headerRow, userGrid, ctx, pc);
+}
+
+/**
+ * editTableCellsInPlace rebuilds the changed cells of a table whose row count is
+ * unchanged, walking the cells in document order and tracking each origin's grid
+ * position exactly as {@link buildTableGrid} does — so a colspan or rowspan lands
+ * every cell against the right grid value. Only cells whose rendered value differs
+ * from the user's are rebuilt.
+ */
+function editTableCellsInPlace(
+    node: Node,
+    gridText: string[][],
+    gridHead: boolean[][],
+    headerRow: boolean,
+    userGrid: string[][],
+    ctx: MdCtx,
+    pc: ParseCtx,
+    force: boolean,
+): void {
     const placed = new Map<number, Set<number>>();
     const taken = (r: number, c: number): boolean =>
         placed.get(r)?.has(c) ?? false;
@@ -1281,6 +1381,263 @@ function rebuildTable(
             c += cs;
         }
     }
+}
+
+/**
+ * tableHasSpans reports whether any cell in the table carries a colspan or rowspan
+ * greater than one. Such a span makes the grid deeper or wider than the tableRow /
+ * cell counts, so a grid row no longer maps 1:1 to a tableRow and row insertion or
+ * deletion cannot be localized — the caller freezes the row count in that case.
+ */
+function tableHasSpans(node: Node): boolean {
+    for (const row of node.content ?? []) {
+        for (const cell of row.content ?? []) {
+            if (
+                attrInt(cell.attrs, "colspan") > 1 ||
+                attrInt(cell.attrs, "rowspan") > 1
+            ) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/**
+ * rebuildTableGrid re-aligns a span-free table when the user changed its row count,
+ * its column count, or both. It decouples the two axes so a single algorithm covers
+ * every case: columns are aligned first, keyed on the table's top row alone (the
+ * header of a header-row table, the first row otherwise), which is stable no matter
+ * which data rows the user added or removed; rows are then aligned on their cells
+ * projected onto just the surviving (kept or edited) columns, which is stable no
+ * matter which columns the user added or removed. Both alignments use the same LCS
+ * diff as the top-level push (see {@link diffBlocks}), so an edited row or column is
+ * folded into a modify rather than a delete+insert and keeps its ADF identity.
+ *
+ * Every output row is then assembled by walking the column edit script: a kept or
+ * edited row reuses its tableRow node and rebuilds its cells (reusing each surviving
+ * cell, so localIds survive, and inserting a fresh cell per new column); an inserted
+ * row is built whole. An inserted cell is a tableHeader in the top row of a
+ * header-row table (so that row stays all-header) or in a key/value header column,
+ * and a tableCell otherwise. The top-level PutGet law still gates the result, so an
+ * ambiguous alignment fails as a safe rejection rather than a corrupt push.
+ */
+function rebuildTableGrid(
+    node: Node,
+    gridText: string[][],
+    gridHead: boolean[][],
+    headerRow: boolean,
+    userGrid: string[][],
+    ctx: MdCtx,
+    pc: ParseCtx,
+): void {
+    const content = node.content ?? [];
+    const rows = gridText.length;
+    const cols = gridText[0]?.length ?? 0;
+    const userRows = userGrid.length;
+    const userCols = userGrid[0]?.length ?? 0;
+
+    // Align columns on the top row alone: its cell is a column's identity, stable
+    // across any data-row change. displayCell bolds a header cell as the render
+    // does, so an unchanged column's key matches the user's.
+    const baseCols = Array.from({ length: cols }, (_, c) =>
+        newBlock(
+            rowLine([
+                displayCell(
+                    gridText[0]?.[c] ?? "",
+                    gridHead[0]?.[c] ?? false,
+                    headerRow,
+                ),
+            ]),
+        ),
+    );
+    const userCols_ = Array.from({ length: userCols }, (_, c) =>
+        newBlock(rowLine([escapeTableCell(userGrid[0]?.[c] ?? "")])),
+    );
+    const colEdits = diffBlocks(baseCols, userCols_);
+
+    // The data-row cell type per user column: a column kept or edited from the base
+    // inherits its type (tableHeader for a key/value header column); a new column
+    // defaults to a data cell.
+    const origColTypes = headerColumnTypes(rows, cols, gridHead, headerRow);
+    const userColType = new Array<string>(userCols).fill("tableCell");
+    // Columns kept or edited from the base, as [baseCol, userCol] pairs; the row
+    // alignment projects each row onto exactly these to stay column-change-agnostic.
+    const keptPairs: Array<[number, number]> = [];
+    for (const e of colEdits) {
+        if (e.kind === "keep" || e.kind === "modify") {
+            userColType[e.userIndex] = origColTypes[e.baseIndex] ?? "tableCell";
+            keptPairs.push([e.baseIndex, e.userIndex]);
+        }
+    }
+
+    // Align rows on their surviving-column projection.
+    const baseRows = Array.from({ length: rows }, (_, r) =>
+        newBlock(
+            rowLine(
+                keptPairs.map(([c]) =>
+                    displayCell(
+                        gridText[r]?.[c] ?? "",
+                        gridHead[r]?.[c] ?? false,
+                        headerRow && r === 0,
+                    ),
+                ),
+            ),
+        ),
+    );
+    const userRows_ = Array.from({ length: userRows }, (_, r) =>
+        newBlock(
+            rowLine(
+                keptPairs.map(([, uc]) =>
+                    escapeTableCell(userGrid[r]?.[uc] ?? ""),
+                ),
+            ),
+        ),
+    );
+    const rowEdits = diffBlocks(baseRows, userRows_);
+
+    const out: Node[] = [];
+    for (const re of rowEdits) {
+        if (re.kind === "delete") {
+            continue; // the row is dropped by not appending it
+        }
+        const ur = re.userIndex;
+        // The first output row of a header-row table is the GFM header, all headers.
+        const isHeaderOut = headerRow && out.length === 0;
+        const origRow =
+            re.kind === "insert" ? undefined : content[re.baseIndex];
+        const origCells = origRow?.content ?? [];
+        const cells: Node[] = [];
+        for (const ce of colEdits) {
+            switch (ce.kind) {
+                case "keep":
+                case "modify": {
+                    const r = re.baseIndex;
+                    const cell =
+                        re.kind === "insert"
+                            ? undefined
+                            : origCells[ce.baseIndex];
+                    if (cell !== undefined) {
+                        editTableCellIfChanged(
+                            cell,
+                            gridText[r]?.[ce.baseIndex] ?? "",
+                            gridHead[r]?.[ce.baseIndex] ?? false,
+                            headerRow && r === 0,
+                            userGrid[ur]?.[ce.userIndex] ?? "",
+                            r,
+                            ce.baseIndex,
+                            ctx,
+                            pc,
+                            false,
+                        );
+                        cells.push(cell);
+                    } else {
+                        // A surviving column of a newly inserted row: build it fresh.
+                        cells.push(
+                            buildTableCell(
+                                userGrid[ur]?.[ce.userIndex] ?? "",
+                                isHeaderOut
+                                    ? "tableHeader"
+                                    : (userColType[ce.userIndex] ??
+                                          "tableCell"),
+                                pc,
+                            ),
+                        );
+                    }
+                    break;
+                }
+                case "insert":
+                    cells.push(
+                        buildTableCell(
+                            userGrid[ur]?.[ce.userIndex] ?? "",
+                            isHeaderOut
+                                ? "tableHeader"
+                                : (userColType[ce.userIndex] ?? "tableCell"),
+                            pc,
+                        ),
+                    );
+                    break;
+                case "delete":
+                    // The cell is dropped by not appending it.
+                    break;
+            }
+        }
+        if (origRow !== undefined) {
+            origRow.content = cells;
+            out.push(origRow);
+        } else {
+            out.push({ type: "tableRow", content: cells });
+        }
+    }
+    node.content = out;
+}
+
+/**
+ * headerColumnTypes derives the ADF cell type an inserted cell should use per
+ * column: tableHeader for a column that is a header in every data row (the shape
+ * of a key/value table's first column), tableCell otherwise. Data rows exclude the
+ * top row of an all-header-first-row table. A table with no data rows yields all
+ * tableCell.
+ */
+function headerColumnTypes(
+    rows: number,
+    cols: number,
+    gridHead: boolean[][],
+    headerRow: boolean,
+): string[] {
+    const firstData = headerRow ? 1 : 0;
+    const types: string[] = [];
+    for (let c = 0; c < cols; c++) {
+        let allHead = firstData < rows;
+        for (let r = firstData; r < rows; r++) {
+            if (!(gridHead[r]?.[c] ?? false)) {
+                allHead = false;
+                break;
+            }
+        }
+        types.push(allHead ? "tableHeader" : "tableCell");
+    }
+    return types;
+}
+
+/**
+ * buildTableCell constructs a fresh table cell of the given type (tableHeader or
+ * tableCell) from an inserted cell's text. A header-column cell renders bolded, so
+ * a `**…**` wrapper is stripped before the inner text is parsed, letting the render
+ * re-bold it rather than double-bold a literal `**…**`. The cell holds a single
+ * paragraph whose `<br>`-separated segments become hardBreak-joined inline runs,
+ * the inverse of the cell render. It carries no localId, so Confluence assigns one
+ * on save, as it does for any inserted node.
+ */
+function buildTableCell(text: string, type: string, pc: ParseCtx): Node {
+    let val = text;
+    if (type === "tableHeader" && wrapsInSingleBold(val)) {
+        val = val.slice(2, val.length - 2);
+    }
+    const para: Node = { type: "paragraph" };
+    const inline = parseSegments(val, "<br>", pc);
+    if (inline.length > 0) {
+        para.content = inline;
+    }
+    return { type, content: [para] };
+}
+
+/**
+ * displayCell renders a single grid cell to the escaped, bolded-if-header text the
+ * table render emits for it: a header cell outside the top header row is wrapped in
+ * `**…**`, everything else is the escaped value. It is the per-cell core the row
+ * and column diffs match on, so an unchanged cell's key matches the user's.
+ */
+function displayCell(v: string, head: boolean, inHeaderRow: boolean): string {
+    const esc = escapeTableCell(v);
+    return head && !inHeaderRow && esc !== "" && esc !== spanMarker
+        ? `**${esc}**`
+        : esc;
+}
+
+/** rowLine joins already-escaped cell texts into a `| a | b |` table line. */
+function rowLine(escaped: string[]): string {
+    return `${escaped.map((c) => `| ${c} `).join("")}|`;
 }
 
 /**
