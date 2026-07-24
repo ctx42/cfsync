@@ -15,7 +15,13 @@
 import { MergeConflictError, merge3Links } from "../adf/lens/merge.ts";
 import type { NewImage } from "../adf/lens/reconstruct.ts";
 import { goQuote } from "../adf/render/frontmatter.ts";
-import { cacheFile, type Page, pageDoc, writePage } from "../cache/cache.ts";
+import {
+    cacheFile,
+    cacheFileName,
+    type Page,
+    pageDoc,
+    writePage,
+} from "../cache/cache.ts";
 import type { Config } from "../config/config.ts";
 import type { ConfluenceClient, PageData } from "../confluence/client.ts";
 import type { Flavor } from "../flavor/flavor.ts";
@@ -786,7 +792,12 @@ export class Pusher {
 }
 
 /** PreflightClass classifies a push candidate against its remote version. */
-export type PreflightClass = "new" | "in-sync" | "remote-moved" | "skip";
+export type PreflightClass =
+    | "new"
+    | "in-sync"
+    | "unchanged"
+    | "remote-moved"
+    | "skip";
 
 /** PreflightEntry is one candidate's local/remote version comparison. */
 export interface PreflightEntry {
@@ -805,6 +816,8 @@ export interface PreflightDeps {
     fs: FileSystem;
     yaml: Yaml;
     config: Config;
+    /** Device-local ADF cache dir, holding the `.vN.md` render each note is compared to. */
+    cacheDir: string;
 }
 
 /**
@@ -813,7 +826,12 @@ export interface PreflightDeps {
  * note with no readable frontmatter is `skip`; one with no page id is `new` (it
  * would be created); a readable managed page whose remote version exceeds the
  * local base is `remote-moved` (push will three-way-merge or refuse), else
- * `in-sync`. The remote versions come from one bulk {@link
+ * `in-sync`. An `in-sync` page that is byte-identical to the cached render of its
+ * base version — no local edit, so a push would PUT nothing — is `unchanged`
+ * instead, letting the preview hide it (see {@link unchangedLocally}). A
+ * `remote-moved` page keeps that class even when locally unchanged, so `status`
+ * still reports it as needing a re-pull. The remote versions come from one bulk
+ * {@link
  * ConfluenceClient.fetchPageVersions} call rather than a fetch per page, so a
  * whole preview costs a handful of requests. A page absent from that response
  * (deleted or not visible) is `skip`; a transport failure marks every looked-up
@@ -825,7 +843,7 @@ export async function pushPreflight(
     dests: string[],
     cache?: MetaCache,
 ): Promise<PreflightEntry[]> {
-    const { client, fs, yaml, config } = deps;
+    const { client, fs, yaml, config, cacheDir } = deps;
     const out: (PreflightEntry | null)[] = new Array(dests.length).fill(null);
     const pending: {
         idx: number;
@@ -890,7 +908,14 @@ export async function pushPreflight(
             );
             continue;
         }
-        const cls = remote > p.localBase ? "remote-moved" : "in-sync";
+        let cls: PreflightClass =
+            remote > p.localBase ? "remote-moved" : "in-sync";
+        if (
+            cls === "in-sync" &&
+            (await unchangedLocally(fs, cacheDir, p.name, p.localBase, p.dest))
+        ) {
+            cls = "unchanged";
+        }
         out[p.idx] = entry(
             p.dest,
             p.name,
@@ -953,6 +978,40 @@ export async function loadPushInput(
         meta.pageVersion,
     );
     return { meta, body, base, bodyLine };
+}
+
+/**
+ * unchangedLocally reports whether the note at `dest` is byte-identical to the
+ * cached render of its base `version` — the exact text pull or the last push
+ * wrote to both. When they match the note carries no local edit, so a push would
+ * reconstruct the baseline and PUT nothing (the render↔reconstruct round-trip
+ * law), and preflight can hide it. It compares whole files, so a title or body
+ * edit is caught; a missing cache render (fresh clone, pruned cache) or an
+ * unreadable note reads as changed, so a note is never wrongly hidden. `name` is
+ * the syncRoot-relative page name.
+ */
+async function unchangedLocally(
+    fs: FileSystem,
+    cacheDir: string,
+    name: string,
+    version: number,
+    dest: string,
+): Promise<boolean> {
+    try {
+        const note = await fs.readText(dest);
+        const cached = await fs.readText(
+            posixJoin(cacheDir, mdCacheName(name, version)),
+        );
+        return note === cached;
+    } catch {
+        return false;
+    }
+}
+
+/** mdCacheName is the cached-render (`.vN.md`) filename for page `name`. */
+function mdCacheName(name: string, version: number): string {
+    const json = cacheFileName(name, version);
+    return `${json.slice(0, -".json".length)}.md`;
 }
 
 /** readCache reads and parses the cached ADF wrapper for a page version. */

@@ -245,7 +245,7 @@ describe("Puller.pullPages", () => {
         expect(await fs.exists("/data/cache/notes/page.v3.md")).toBe(true);
     });
 
-    it("reports unchanged on a second pull of the same version", async () => {
+    it("counts unchanged on a second pull but keeps it out of the log", async () => {
         const config = testConfig({ "p.md": "/wiki/spaces/X/pages/123/Title" });
         const stub = new StubHttpClient().on("GET", pageURL("123"), {
             body: pageBody("123", 3),
@@ -257,7 +257,8 @@ describe("Puller.pullPages", () => {
 
         expect(out.stats.unchanged).toBe(1);
         expect(out.stats.added).toBe(0);
-        expect(out.log).toContain("unchanged");
+        // An unchanged page is tallied but produces no per-page log line.
+        expect(out.log).toBe("");
     });
 
     it("renders from cache without fetching when the version is already cached", async () => {

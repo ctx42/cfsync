@@ -109,7 +109,13 @@ export async function preflight(
     const cache = new MetaCache();
     const dests = await pushDestsFor(rt, scope, activeDest, cache);
     return pushPreflight(
-        { client: rt.client, fs: rt.fs, yaml: rt.yaml, config: rt.config },
+        {
+            client: rt.client,
+            fs: rt.fs,
+            yaml: rt.yaml,
+            config: rt.config,
+            cacheDir: rt.dirs.cacheDir,
+        },
         dests,
         cache,
     );

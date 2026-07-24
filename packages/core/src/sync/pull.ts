@@ -336,6 +336,11 @@ export class Puller {
                 spaceKey,
                 parentOverride,
             );
+            // An unchanged note is noise in a whole-vault pull: skip its live and
+            // buffered log line, but still count it in the stats and summary.
+            if (action === "unchanged") {
+                return { line: "", state, action, error: null };
+            }
             const line = pageLine(action, state, name, version);
             this.d.reporter.log(line);
             return { line, state, action, error: null };

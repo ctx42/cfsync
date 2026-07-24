@@ -355,17 +355,23 @@ export class cfsyncView extends ItemView {
         this.previewPending = true;
 
         this.renderTitle(root, "arrow-up", "Review push");
-        const pushable = entries.filter((e) => e.cls !== "skip");
+        // An unchanged note would push nothing, so it is hidden from the review
+        // rather than listed and auto-skipped; its tally still reports the count.
+        const shown = entries.filter((e) => e.cls !== "unchanged");
+        const unchanged = entries.length - shown.length;
+        const pushable = shown.filter((e) => e.cls !== "skip");
         root.createDiv({
             cls: "cfsync-sub",
-            text: `${pushable.length} of ${entries.length} note${
-                entries.length === 1 ? "" : "s"
-            } ready to push`,
+            text:
+                `${pushable.length} of ${shown.length} note${
+                    shown.length === 1 ? "" : "s"
+                } ready to push` +
+                (unchanged > 0 ? ` · ${unchanged} unchanged` : ""),
         });
 
         const chosen = new Set(pushable.map((e) => e.dest));
         const list = root.createDiv({ cls: "cfsync-preview" });
-        for (const e of entries) {
+        for (const e of shown) {
             const row = list.createEl("label", {
                 cls: `cfsync-prow cfsync-${chipKind(e)}`,
             });

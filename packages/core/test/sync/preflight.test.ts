@@ -10,6 +10,7 @@ import { QueueHttpClient } from "../support/http-queue.ts";
 import { MemFS } from "../support/memfs.ts";
 
 const yaml = { parse };
+const cacheDir = "/cache";
 
 function cfg() {
     return buildConfig(
@@ -58,12 +59,15 @@ describe("pushPreflight", () => {
         );
         const client = clientOf(http);
 
-        const out = await pushPreflight({ client, fs, yaml, config: cfg() }, [
-            "/vault/wiki/A.md",
-            "/vault/wiki/B.md",
-            "/vault/wiki/New.md",
-            "/vault/wiki/Bad.md",
-        ]);
+        const out = await pushPreflight(
+            { client, fs, yaml, config: cfg(), cacheDir },
+            [
+                "/vault/wiki/A.md",
+                "/vault/wiki/B.md",
+                "/vault/wiki/New.md",
+                "/vault/wiki/Bad.md",
+            ],
+        );
 
         expect(http.count).toBe(1); // bulk, not one fetch per page
         const by = Object.fromEntries(out.map((e) => [e.dest, e]));
@@ -74,6 +78,44 @@ describe("pushPreflight", () => {
         expect(by["/vault/wiki/Bad.md"]?.cls).toBe("skip");
     });
 
+    it("marks a note byte-identical to its cached render unchanged", async () => {
+        const fs = new MemFS();
+        // A matches its cached v5 render (no local edit); B differs from it.
+        await fs.write("/vault/wiki/A.md", note("101", 5));
+        await fs.write("/cache/wiki/A.v5.md", note("101", 5));
+        await fs.write("/vault/wiki/B.md", note("102", 5));
+        await fs.write("/cache/wiki/B.v5.md", note("102", 5) + "edited\n");
+        const http = new QueueHttpClient().rsp(
+            200,
+            versionsJson(["101", 5], ["102", 5]),
+        );
+
+        const out = await pushPreflight(
+            { client: clientOf(http), fs, yaml, config: cfg(), cacheDir },
+            ["/vault/wiki/A.md", "/vault/wiki/B.md"],
+        );
+
+        const by = Object.fromEntries(out.map((e) => [e.dest, e]));
+        expect(by["/vault/wiki/A.md"]?.cls).toBe("unchanged");
+        expect(by["/vault/wiki/B.md"]?.cls).toBe("in-sync");
+    });
+
+    it("keeps a remote-moved note remote-moved even when locally unchanged", async () => {
+        const fs = new MemFS();
+        await fs.write("/vault/wiki/A.md", note("101", 5));
+        await fs.write("/cache/wiki/A.v5.md", note("101", 5));
+        // No local edit, but the remote moved ahead: status must still flag it,
+        // so remote-moved wins over unchanged.
+        const http = new QueueHttpClient().rsp(200, versionsJson(["101", 8]));
+
+        const out = await pushPreflight(
+            { client: clientOf(http), fs, yaml, config: cfg(), cacheDir },
+            ["/vault/wiki/A.md"],
+        );
+
+        expect(out[0]?.cls).toBe("remote-moved");
+    });
+
     it("preserves the dest order of its input", async () => {
         const fs = new MemFS();
         await fs.write("/vault/wiki/New.md", note("", 0));
@@ -81,7 +123,7 @@ describe("pushPreflight", () => {
         const http = new QueueHttpClient().rsp(200, versionsJson(["101", 5]));
 
         const out = await pushPreflight(
-            { client: clientOf(http), fs, yaml, config: cfg() },
+            { client: clientOf(http), fs, yaml, config: cfg(), cacheDir },
             ["/vault/wiki/New.md", "/vault/wiki/A.md"],
         );
 
@@ -98,7 +140,7 @@ describe("pushPreflight", () => {
         const http = new QueueHttpClient().rsp(200, versionsJson());
 
         const out = await pushPreflight(
-            { client: clientOf(http), fs, yaml, config: cfg() },
+            { client: clientOf(http), fs, yaml, config: cfg(), cacheDir },
             ["/vault/wiki/A.md"],
         );
 
@@ -113,7 +155,7 @@ describe("pushPreflight", () => {
         const http = new QueueHttpClient().rsp(500, "boom");
 
         const out = await pushPreflight(
-            { client: clientOf(http), fs, yaml, config: cfg() },
+            { client: clientOf(http), fs, yaml, config: cfg(), cacheDir },
             ["/vault/wiki/A.md"],
         );
 

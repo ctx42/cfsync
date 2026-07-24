@@ -240,7 +240,13 @@ export async function runStatus(d: CliDeps): Promise<CommandResult> {
         return { out: "cfsync: no pages to check\n", error: null };
     }
     const entries = await pushPreflight(
-        { client: d.client, fs: d.fs, yaml: d.yaml, config: d.config },
+        {
+            client: d.client,
+            fs: d.fs,
+            yaml: d.yaml,
+            config: d.config,
+            cacheDir: d.dirs.cacheDir,
+        },
         dests,
         cache,
     );
