@@ -101,6 +101,7 @@ describe("put insert round-trip (tabular)", () => {
             body: "| a \\| b |\n|--------|\n| c      |",
             wantType: "table",
         },
+        { name: "thematic break", body: "---", wantType: "rule" },
     ];
 
     for (const tc of cases) {
@@ -124,6 +125,24 @@ describe("put insertCodeBlock", () => {
         const node = insert("```\n\n```").doc.content?.[0];
         expect(node?.type).toBe("codeBlock");
         expect(node?.content ?? []).toEqual([]);
+    });
+});
+
+describe("put insert rule", () => {
+    it("builds a bare rule node with no attrs", () => {
+        const node = insert("---").doc.content?.[0];
+        expect(node?.type).toBe("rule");
+        expect(node?.attrs).toBeUndefined();
+        expect(node?.content).toBeUndefined();
+    });
+
+    it("any thematic-break spelling normalizes to a `---` rule", () => {
+        for (const body of ["***", "___", "- - -", "----"]) {
+            const out = insert(body);
+            expect(out.doc.content?.[0]?.type).toBe("rule");
+            // PutGet: the render canonicalizes every spelling to `---`.
+            expect(renderBody(out)).toBe("---");
+        }
     });
 });
 

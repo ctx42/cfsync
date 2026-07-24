@@ -110,6 +110,17 @@ describe("renderBlock extension", () => {
     });
 });
 
+describe("renderBlock rule", () => {
+    it("a horizontal rule renders as a `---` thematic break", () => {
+        expect(renderBlock({ type: "rule" }, ctx)).toBe("---");
+    });
+
+    it("drops the rule's localId (kept via the origin on push)", () => {
+        const nod: Node = { type: "rule", attrs: { localId: "r1" } };
+        expect(renderBlock(nod, ctx)).toBe("---");
+    });
+});
+
 describe("renderMedia", () => {
     it("renders an embed when the asset resolves", () => {
         const nod: Node = {

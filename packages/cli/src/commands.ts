@@ -20,10 +20,11 @@ import {
     loadLinkIndex,
     MetaCache,
     managedPushDests,
-    type PageState,
+    type PageAction,
     type PreflightEntry,
     Puller,
     Pusher,
+    pageLine,
     pageName,
     planCreates,
     pullConfig,
@@ -149,10 +150,14 @@ async function pullSelected(
         links,
         flavor: resolveFlavor(d.config.flavor),
     });
-    const { state, version } = await puller.pullOne(dest, src, spaceKey);
-    const line = selectedLine(state, name, version);
+    const { state, action, version } = await puller.pullOne(
+        dest,
+        src,
+        spaceKey,
+    );
+    const line = pageLine(action, state, name, version);
     d.reporter.log(line);
-    return { out: streamed(d, line, selectedSummary(state)), error: null };
+    return { out: streamed(d, line, selectedSummary(action)), error: null };
 }
 
 /**
@@ -329,29 +334,21 @@ async function isLocal(d: CliDeps, dest: string): Promise<boolean> {
     return meta?.local === true;
 }
 
-/** selectedLine formats the per-page progress line for a single pulled page. */
-function selectedLine(state: PageState, name: string, ver: number): string {
-    if (state === "rerendered") {
-        return `pulling ${name} ... skipped (v${ver} cached), md written\n`;
-    }
-    if (state === "unchanged") {
-        return `pulling ${name} ... skipped (v${ver} cached), unchanged\n`;
-    }
-    return `pulling ${name} ... ok (v${ver})\n`;
-}
-
 /** selectedSummary is the closing summary for a single-page pull. */
-function selectedSummary(state: PageState): string {
-    if (state === "rerendered") {
+function selectedSummary(action: PageAction): string {
+    if (action === "added") {
+        return "cfsync: 1 page pulled — new note added\n";
+    }
+    if (action === "updated") {
+        return "cfsync: 1 page pulled — note updated\n";
+    }
+    if (action === "conflict") {
         return (
-            "cfsync: 1 page re-rendered from cache — Markdown rewritten " +
-            "from cached ADF, no new version pulled\n"
+            "cfsync: 1 page pulled — conflict markers written, resolve them " +
+            "before pushing\n"
         );
     }
-    if (state === "unchanged") {
-        return "cfsync: 1 page already up to date — nothing written\n";
-    }
-    return "cfsync: 1 page pulled (new version)\n";
+    return "cfsync: 1 page already up to date — nothing written\n";
 }
 
 /**

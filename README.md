@@ -242,7 +242,10 @@ cfsync <command> [flags] [page]
 
 test            Verify authenticated access to the Atlassian Site.
 pull [page]     Pull configured pages, folders, and spaces into the cache.
-                With a page path, pull only that one managed page.
+                Reports each note as added, updated, unchanged, or conflict,
+                and removes notes whose Confluence page no longer exists (a
+                note with unpushed edits is kept, with a warning). With a page
+                path, pull only that one managed page.
 push [page]     Push edited Markdown back to Confluence, creating confirmed
                 new pages. With a page path, push only that page.
 status          List managed pages whose Confluence version has moved ahead
@@ -251,7 +254,8 @@ status          List managed pages whose Confluence version has moved ahead
 gc              List orphaned files in the shared _assets directory. Add
                 --prune to delete them.
 clean           Remove local files under configured folder and space roots
-                that no longer exist in Confluence. Prompts unless --yes.
+                that no longer exist in Confluence, including notes with
+                unpushed edits that a pull keeps back. Prompts unless --yes.
 version         Print the program version and exit.
 help [command]  Print help, or help for a command.
 ```

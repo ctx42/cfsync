@@ -226,15 +226,17 @@ describe("Puller.pullPages", () => {
         const out = await puller.pullPages();
 
         expect(out.stats).toEqual({
-            pulled: 1,
-            rendered: 0,
+            added: 1,
+            updated: 0,
             unchanged: 0,
-            merged: 0,
             conflict: 0,
+            deleted: 0,
+            rerendered: 0,
             total: 1,
         });
         expect(out.errors).toEqual([]);
-        expect(out.log).toContain("pulling notes/page.md ... ok (v3)");
+        expect(out.log).toContain("added");
+        expect(out.log).toContain("notes/page.md (v3)");
         expect(await fs.readText("/vault/notes/page.md")).toContain("hello");
         expect(await fs.readText("/vault/notes/page.md")).toContain(
             "cfsync-plugin: pull",
@@ -254,7 +256,7 @@ describe("Puller.pullPages", () => {
         const out = await puller.pullPages();
 
         expect(out.stats.unchanged).toBe(1);
-        expect(out.stats.pulled).toBe(0);
+        expect(out.stats.added).toBe(0);
         expect(out.log).toContain("unchanged");
     });
 
@@ -282,7 +284,7 @@ describe("Puller.pullPages", () => {
 
         expect(out.errors).toEqual([]);
         expect(out.stats.unchanged).toBe(1);
-        expect(out.stats.pulled).toBe(0);
+        expect(out.stats.added).toBe(0);
         expect(noNet.requests).toHaveLength(0); // zero network calls
     });
 
@@ -309,7 +311,7 @@ describe("Puller.pullPages", () => {
         const out = await puller.pullPages();
 
         expect(out.errors).toEqual([]);
-        expect(out.stats.pulled).toBe(1);
+        expect(out.stats.updated).toBe(1);
         expect(v4.requests.length).toBeGreaterThan(0);
         expect(await fs.exists("/data/cache/p.v4.json")).toBe(true);
     });
@@ -325,7 +327,8 @@ describe("Puller.pullPages", () => {
         await fs.write("/vault/p.md", "clobbered");
         const out = await puller.pullPages();
 
-        expect(out.stats.rendered).toBe(1);
+        expect(out.stats.updated).toBe(1);
+        expect(out.stats.rerendered).toBe(1);
         expect(await fs.readText("/vault/p.md")).toContain("hello");
     });
 
@@ -343,7 +346,8 @@ describe("Puller.pullPages", () => {
         const out = await puller.pullPages(); // same v3: remote unchanged
 
         expect(out.stats.conflict).toBe(0);
-        expect(out.stats.merged).toBe(0);
+        expect(out.stats.updated).toBe(0);
+        expect(out.stats.unchanged).toBe(1);
         expect(await fs.readText("/vault/p.md")).toContain("beta-local");
     });
 
@@ -371,7 +375,7 @@ describe("Puller.pullPages", () => {
 
         const out = await puller.pullPages();
 
-        expect(out.stats.merged).toBe(1);
+        expect(out.stats.updated).toBe(1);
         expect(out.stats.conflict).toBe(0);
         const note = await fs.readText("/vault/p.md");
         expect(note).toContain("beta-local");
@@ -441,7 +445,7 @@ describe("Puller.pullPages", () => {
 
         const out = await puller.pullPages();
 
-        expect(out.stats).toMatchObject({ pulled: 1, total: 2 });
+        expect(out.stats).toMatchObject({ added: 1, total: 2 });
         expect(out.errors).toHaveLength(1);
         expect(out.errors[0]).toContain("b.md");
     });
@@ -624,7 +628,7 @@ describe("pullConfig (discovery + pull)", () => {
             linksPath: "/data/cache/links.json",
         });
 
-        expect(out.stats).toMatchObject({ pulled: 1, total: 1 });
+        expect(out.stats).toMatchObject({ added: 1, total: 1 });
         expect(out.errors).toEqual([]);
         expect(await fs.readText("/vault/docs/guide.md")).toContain("hello");
         const links = await fs.readText("/data/cache/links.json");
@@ -688,6 +692,84 @@ describe("pullConfig (discovery + pull)", () => {
         expect(out.log).toContain("both hold unpushed edits");
         expect(await fs.exists("/vault/docs/old.md")).toBe(true);
         expect(await fs.readText("/vault/docs/old.md")).toContain("old edit");
+    });
+
+    it("deletes a note whose Confluence page no longer exists", async () => {
+        const cfg = folderConfig();
+        const stub = folderStub().on("GET", pageURL("7"), {
+            body: pageBody("7", 2),
+        });
+        const fs = new MemFS();
+        // A managed note for a page the folder no longer lists (id 99), clean
+        // against its cached base — so it is a pure leftover of a deletion.
+        await fs.write("/vault/docs/gone.md", managedNote("99", 2, "stale"));
+        await fs.write("/data/cache/docs/gone.v2.md", cacheNote(2, "stale"));
+
+        const out = await pullConfigWith(cfg, stub, fs);
+
+        expect(out.errors).toEqual([]);
+        expect(out.stats.deleted).toBe(1);
+        expect(out.log).toContain("deleted");
+        expect(out.log).toContain("docs/gone.md");
+        expect(await fs.exists("/vault/docs/gone.md")).toBe(false);
+        // The live page was still pulled.
+        expect(await fs.exists("/vault/docs/guide.md")).toBe(true);
+    });
+
+    it("keeps a vanished page's note when it has unpushed edits", async () => {
+        const cfg = folderConfig();
+        const stub = folderStub().on("GET", pageURL("7"), {
+            body: pageBody("7", 2),
+        });
+        const fs = new MemFS();
+        // The note diverges from its cached base: unpushed local edits the pull
+        // must not throw away, even though the remote page is gone.
+        await fs.write("/vault/docs/gone.md", managedNote("99", 2, "my edit"));
+        await fs.write("/data/cache/docs/gone.v2.md", cacheNote(2, "stale"));
+
+        const out = await pullConfigWith(cfg, stub, fs);
+
+        expect(out.stats.deleted).toBe(0);
+        expect(out.log).toContain("unpushed edits");
+        expect(await fs.exists("/vault/docs/gone.md")).toBe(true);
+    });
+
+    it("refuses to delete when a root discovery returns no pages", async () => {
+        const cfg = folderConfig();
+        // Folder 100 lists no children — a suspect empty listing, not a genuine
+        // emptying, so the managed note under it must survive.
+        const stub = new StubHttpClient().on(
+            "GET",
+            "https://ex.atlassian.net/wiki/api/v2/folders/100/direct-children",
+            { body: JSON.stringify({ results: [], _links: {} }) },
+        );
+        const fs = new MemFS();
+        await fs.write("/vault/docs/gone.md", managedNote("99", 2, "stale"));
+        await fs.write("/data/cache/docs/gone.v2.md", cacheNote(2, "stale"));
+
+        const out = await pullConfigWith(cfg, stub, fs);
+
+        expect(out.stats.deleted).toBe(0);
+        expect(out.log).toContain("refusing to delete");
+        expect(await fs.exists("/vault/docs/gone.md")).toBe(true);
+    });
+
+    it("leaves a cf_local note alone when its would-be page is absent", async () => {
+        const cfg = folderConfig();
+        const stub = folderStub().on("GET", pageURL("7"), {
+            body: pageBody("7", 2),
+        });
+        const fs = new MemFS();
+        // A locally-created note, never pulled: not a deletion candidate.
+        await fs.write(
+            "/vault/docs/local.md",
+            '---\ntitle: "Local"\ncf_local: true\ncfsync-plugin: pull\n---\n\ndraft\n',
+        );
+
+        const out = await pullConfigWith(cfg, stub, fs);
+
+        expect(out.stats.deleted).toBe(0);
+        expect(await fs.exists("/vault/docs/local.md")).toBe(true);
     });
 
     it("aborts on a destination collision before writing", async () => {
@@ -910,41 +992,61 @@ describe("helpers", () => {
         expect(
             addStats(
                 {
-                    pulled: 1,
-                    rendered: 2,
+                    added: 1,
+                    updated: 2,
                     unchanged: 3,
-                    merged: 1,
                     conflict: 2,
+                    deleted: 1,
+                    rerendered: 1,
                     total: 6,
                 },
                 {
-                    pulled: 1,
-                    rendered: 0,
+                    added: 1,
+                    updated: 0,
                     unchanged: 1,
-                    merged: 4,
                     conflict: 3,
+                    deleted: 4,
+                    rerendered: 0,
                     total: 2,
                 },
             ),
         ).toEqual({
-            pulled: 2,
-            rendered: 2,
+            added: 2,
+            updated: 2,
             unchanged: 4,
-            merged: 5,
             conflict: 5,
+            deleted: 5,
+            rerendered: 1,
             total: 8,
         });
     });
 
-    it("pullSummary notes a re-render caveat only when any page re-rendered", () => {
-        expect(pullSummary({ ...emptyStats(), total: 1, pulled: 1 })).toContain(
-            "1 pulled (new version)",
+    it("pullSummary reports the per-action tally", () => {
+        expect(pullSummary({ ...emptyStats(), total: 1, added: 1 })).toContain(
+            "1 added, 0 updated",
         );
+    });
+
+    it("pullSummary counts deletions only when any note was deleted", () => {
         expect(
-            pullSummary({ ...emptyStats(), total: 1, rendered: 1 }),
+            pullSummary({ ...emptyStats(), total: 1, added: 1, deleted: 2 }),
+        ).toContain("2 deleted");
+        expect(
+            pullSummary({ ...emptyStats(), total: 1, added: 1 }),
+        ).not.toContain("deleted");
+    });
+
+    it("pullSummary notes a re-render caveat only when any page re-rendered", () => {
+        expect(
+            pullSummary({
+                ...emptyStats(),
+                total: 1,
+                updated: 1,
+                rerendered: 1,
+            }),
         ).toContain("show up as changes in git");
         expect(
-            pullSummary({ ...emptyStats(), total: 1, pulled: 1 }),
+            pullSummary({ ...emptyStats(), total: 1, added: 1 }),
         ).not.toContain("show up as changes in git");
     });
 });

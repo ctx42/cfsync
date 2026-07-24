@@ -9,6 +9,7 @@
 
 import { describe, expect, it } from "vitest";
 import {
+    isThematicBreak,
     normalizeBlock,
     segmentBody,
     splitTableRow,
@@ -59,6 +60,16 @@ describe("normalizeBlock", () => {
             want: "a  b",
         },
         { testN: "empty stays empty", in: "   \n  ", want: "" },
+        {
+            testN: "a thematic break canonicalizes to `---`",
+            in: "***",
+            want: "---",
+        },
+        {
+            testN: "a spaced thematic break canonicalizes to `---`",
+            in: "- - -",
+            want: "---",
+        },
     ];
 
     for (const tc of tt) {
@@ -66,6 +77,26 @@ describe("normalizeBlock", () => {
             expect(normalizeBlock(tc.in)).toBe(tc.want);
         });
     }
+});
+
+describe("isThematicBreak", () => {
+    it.each(["---", "***", "___", "----", "- - -", "  ---  ", " *** "])(
+        "recognizes %j as a thematic break",
+        (text) => {
+            expect(isThematicBreak(text)).toBe(true);
+        },
+    );
+
+    it.each([
+        "--", // fewer than three markers
+        "- item", // a bullet list item
+        "-*-", // mixed markers
+        "a---", // not marker-only
+        "---\ntext", // more than one line
+        "", // blank
+    ])("rejects %j", (text) => {
+        expect(isThematicBreak(text)).toBe(false);
+    });
 });
 
 describe("segmentBody", () => {

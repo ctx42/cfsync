@@ -10,12 +10,13 @@ import {
     loadLinkIndex,
     MetaCache,
     managedPushDests,
-    type PageState,
+    type PageAction,
     type PreflightEntry,
     Puller,
     type PullOutcome,
     Pusher,
     type PushOutcome,
+    pageLine,
     pageName,
     planCreates,
     posixClean,
@@ -55,13 +56,13 @@ export function pullVault(
  * pullNote pulls the single managed page at `dest` (an active-note dest). It
  * streams progress through `reporter`; a failure throws rather than returning a
  * per-page outcome, since the view's `guarded()` catches it and there is no
- * batch to fold the result into. Returns the page's pull state.
+ * batch to fold the result into. Returns the page's pull action.
  */
 export async function pullNote(
     rt: PluginRuntime,
     reporter: Reporter,
     dest: string,
-): Promise<PageState> {
+): Promise<PageAction> {
     // Announce the one page up front so the reporter sits in its processing
     // phase throughout — any on-demand root discovery inside resolvePageSource
     // then runs under a steady "pulling <name>" bar, not a discovery counter.
@@ -88,9 +89,13 @@ export async function pullNote(
         links,
         flavor: resolveFlavor(rt.config.flavor),
     });
-    const { state, version } = await puller.pullOne(dest, src, spaceKey);
-    reporter.log(`pulling ${name} ... ${state} (v${version})\n`);
-    return state;
+    const { state, action, version } = await puller.pullOne(
+        dest,
+        src,
+        spaceKey,
+    );
+    reporter.log(pageLine(action, state, name, version));
+    return action;
 }
 
 /** preflight classifies the push candidates for `scope` against their remote versions. */

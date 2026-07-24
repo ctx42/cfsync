@@ -58,7 +58,11 @@ import { splitFrontmatter } from "./push.ts";
 /** The default number of pages a batch pull fetches and renders at once. */
 export const PULL_CONCURRENCY = 8;
 
-/** PageState is the outcome of storing one pulled page. */
+/**
+ * PageState is the mechanical outcome of storing one pulled page — which cache
+ * tier served the render and how the note was reconciled. The user-facing
+ * {@link PageAction} is derived from it.
+ */
 export type PageState =
     | "pulled"
     | "rerendered"
@@ -66,19 +70,34 @@ export type PageState =
     | "merged"
     | "conflict";
 
-/** PullStats tallies the outcomes of pulling a set of pages. */
+/**
+ * PageAction is the user-facing outcome of a pulled page: what happened to the
+ * note file on disk. A new note is `added`; any rewrite of an existing note
+ * (a new version, a re-render, or a merge) is `updated`; a note left untouched
+ * is `unchanged`; a note left with conflict markers is `conflict`. Deletions are
+ * not page pulls — a vanished page's note is removed by the reconciliation pass
+ * and tallied under {@link PullStats.deleted}.
+ */
+export type PageAction = "added" | "updated" | "unchanged" | "conflict";
+
+/** PullStats tallies the outcomes of pulling (and reconciling) a set of pages. */
 export interface PullStats {
-    /** Pages fetched at a version not yet cached. */
-    pulled: number;
-    /** Cached pages whose re-rendered Markdown differed and was rewritten. */
-    rendered: number;
-    /** Cached pages whose Markdown was already current, so nothing was written. */
+    /** Notes created on disk that did not exist before. */
+    added: number;
+    /** Existing notes rewritten (new version, re-render, or clean merge). */
+    updated: number;
+    /** Notes already current, so nothing was written. */
     unchanged: number;
-    /** Pages whose unpushed local edits and remote changes merged cleanly. */
-    merged: number;
-    /** Pages left with unresolved conflict markers for manual resolution. */
+    /** Notes left with unresolved conflict markers for manual resolution. */
     conflict: number;
-    /** Pages attempted; total less the others is the number that failed. */
+    /** Notes removed because their Confluence page no longer exists. */
+    deleted: number;
+    /**
+     * Updated notes whose Markdown was re-rendered from cached ADF without a new
+     * version — a subset of `updated` that drives the "shows up in git" note.
+     */
+    rerendered: number;
+    /** Pages attempted; total less added/updated/unchanged/conflict failed. */
     total: number;
 }
 
@@ -94,8 +113,10 @@ export interface PullOutcome {
 interface PullItemResult {
     /** The per-page log line, or `""` when the page failed. */
     line: string;
-    /** The store outcome, or `null` when the page failed. */
+    /** The mechanical store outcome, or `null` when the page failed. */
     state: PageState | null;
+    /** The user-facing action, or `null` when the page failed. */
+    action: PageAction | null;
     /** The `"name: message"` failure, or `null` on success. */
     error: string | null;
 }
@@ -103,11 +124,12 @@ interface PullItemResult {
 /** emptyStats returns a zeroed tally. */
 export function emptyStats(): PullStats {
     return {
-        pulled: 0,
-        rendered: 0,
+        added: 0,
+        updated: 0,
         unchanged: 0,
-        merged: 0,
         conflict: 0,
+        deleted: 0,
+        rerendered: 0,
         total: 0,
     };
 }
@@ -115,11 +137,12 @@ export function emptyStats(): PullStats {
 /** addStats returns the element-wise sum of two tallies. */
 export function addStats(a: PullStats, b: PullStats): PullStats {
     return {
-        pulled: a.pulled + b.pulled,
-        rendered: a.rendered + b.rendered,
+        added: a.added + b.added,
+        updated: a.updated + b.updated,
         unchanged: a.unchanged + b.unchanged,
-        merged: a.merged + b.merged,
         conflict: a.conflict + b.conflict,
+        deleted: a.deleted + b.deleted,
+        rerendered: a.rerendered + b.rerendered,
         total: a.total + b.total,
     };
 }
@@ -128,10 +151,10 @@ export function addStats(a: PullStats, b: PullStats): PullStats {
 export function pullSummary(s: PullStats): string {
     const noun = s.total === 1 ? "page" : "pages";
     let summary =
-        `cfsync: ${s.total} ${noun} — ${s.pulled} pulled (new version), ` +
-        `${s.rendered} re-rendered, ${s.merged} merged, ` +
-        `${s.conflict} conflicted, ${s.unchanged} unchanged\n`;
-    if (s.rendered > 0) {
+        `cfsync: ${s.total} ${noun} — ${s.added} added, ${s.updated} updated, ` +
+        `${s.unchanged} unchanged, ${s.conflict} conflicted`;
+    summary += s.deleted > 0 ? `, ${s.deleted} deleted\n` : "\n";
+    if (s.rerendered > 0) {
         summary +=
             "cfsync: a re-render rewrites Markdown from cached ADF without " +
             "fetching, so those pages show up as changes in git even though " +
@@ -145,29 +168,84 @@ export function pullSummary(s: PullStats): string {
     return summary;
 }
 
-/** okLine reports a page pulled at a new version. */
-function okLine(name: string, ver: number): string {
-    return `pulling ${name} ... ok (v${ver})\n`;
+/** The column width the action word is padded to, so log lines align. */
+const ACTION_WIDTH = "unchanged".length;
+
+/**
+ * pageLine formats a pulled page's per-page log line: the action word padded to
+ * a fixed column, the note name, and a parenthetical version detail that keeps
+ * the mechanical nuance (a re-render, a merge, or a conflict to resolve).
+ */
+export function pageLine(
+    action: PageAction,
+    state: PageState,
+    name: string,
+    ver: number,
+): string {
+    return `${action.padEnd(ACTION_WIDTH)} ${name} ${detail(action, state, ver)}\n`;
 }
 
-/** skipLine reports a cached page whose re-rendered Markdown was rewritten. */
-function skipLine(name: string, ver: number): string {
-    return `pulling ${name} ... skipped (v${ver} cached), md written\n`;
+/** detail is the parenthetical version note appended to a {@link pageLine}. */
+function detail(action: PageAction, state: PageState, ver: number): string {
+    if (action === "conflict") {
+        return `(v${ver}, resolve markers before pushing)`;
+    }
+    if (action === "updated" && state === "rerendered") {
+        return `(v${ver}, re-rendered from cache)`;
+    }
+    if (action === "updated" && state === "merged") {
+        return `(v${ver}, merged local edits)`;
+    }
+    return `(v${ver})`;
 }
 
-/** unchangedLine reports a cached page whose Markdown was already current. */
-function unchangedLine(name: string, ver: number): string {
-    return `pulling ${name} ... skipped (v${ver} cached), unchanged\n`;
+/** deletedLine reports a note removed because its Confluence page is gone. */
+function deletedLine(name: string): string {
+    return `${"deleted".padEnd(ACTION_WIDTH)} ${name} (removed from Confluence)\n`;
 }
 
-/** mergedLine reports a page whose local edits merged cleanly with the remote. */
-function mergedLine(name: string, ver: number): string {
-    return `pulling ${name} ... merged local edits with v${ver}\n`;
+/** MergeResult is how {@link Puller.mergeIntoNote} reconciled a note. */
+type MergeResult = "wrote" | "kept" | "merged" | "conflict";
+
+/**
+ * storeState maps a store's cache state and merge result onto the mechanical
+ * {@link PageState}: a conflict or clean merge as such, a body fetched at an
+ * uncached version as `pulled`, a rewrite from cache as `rerendered`, and an
+ * untouched note as `unchanged`.
+ */
+function storeState(
+    cacheExisted: boolean,
+    wroteCache: boolean,
+    merge: MergeResult,
+): PageState {
+    if (merge === "conflict") {
+        return "conflict";
+    }
+    if (merge === "merged") {
+        return "merged";
+    }
+    if (!cacheExisted) {
+        return "pulled";
+    }
+    if (wroteCache || merge === "wrote") {
+        return "rerendered";
+    }
+    return "unchanged";
 }
 
-/** conflictLine reports a page left with conflict markers to resolve. */
-function conflictLine(name: string, ver: number): string {
-    return `pulling ${name} ... CONFLICT with v${ver}, resolve markers before pushing\n`;
+/**
+ * storeAction maps a merge result onto the user-facing {@link PageAction}. A
+ * note that was written (or three-way merged) is `added` when it did not exist
+ * before this pull and `updated` otherwise; a kept note is `unchanged`.
+ */
+function storeAction(merge: MergeResult, noteExisted: boolean): PageAction {
+    if (merge === "conflict") {
+        return "conflict";
+    }
+    if (merge === "kept") {
+        return "unchanged";
+    }
+    return noteExisted ? "updated" : "added";
 }
 
 /** PullerDeps are the ports and resolved paths a {@link Puller} needs. */
@@ -252,17 +330,22 @@ export class Puller {
         const name = pageName(this.d.config.syncRoot, dest);
         this.d.reporter.item(name);
         try {
-            const { state, version } = await this.pullOne(
+            const { state, action, version } = await this.pullOne(
                 dest,
                 src,
                 spaceKey,
                 parentOverride,
             );
-            const line = this.stateLine(state, name, version);
+            const line = pageLine(action, state, name, version);
             this.d.reporter.log(line);
-            return { line, state, error: null };
+            return { line, state, action, error: null };
         } catch (err) {
-            return { line: "", state: null, error: `${name}: ${message(err)}` };
+            return {
+                line: "",
+                state: null,
+                action: null,
+                error: `${name}: ${message(err)}`,
+            };
         }
     }
 
@@ -283,36 +366,20 @@ export class Puller {
                 continue;
             }
             out.log += r.line;
-            if (r.state === "pulled") {
-                out.stats.pulled++;
-            } else if (r.state === "rerendered") {
-                out.stats.rendered++;
-            } else if (r.state === "merged") {
-                out.stats.merged++;
-            } else if (r.state === "conflict") {
+            if (r.action === "added") {
+                out.stats.added++;
+            } else if (r.action === "updated") {
+                out.stats.updated++;
+                if (r.state === "rerendered") {
+                    out.stats.rerendered++;
+                }
+            } else if (r.action === "conflict") {
                 out.stats.conflict++;
             } else {
                 out.stats.unchanged++;
             }
         }
         return out;
-    }
-
-    /** stateLine formats the per-page progress line for a page state. */
-    private stateLine(state: PageState, name: string, ver: number): string {
-        if (state === "rerendered") {
-            return skipLine(name, ver);
-        }
-        if (state === "unchanged") {
-            return unchangedLine(name, ver);
-        }
-        if (state === "merged") {
-            return mergedLine(name, ver);
-        }
-        if (state === "conflict") {
-            return conflictLine(name, ver);
-        }
-        return okLine(name, ver);
     }
 
     /**
@@ -326,7 +393,7 @@ export class Puller {
         src: string,
         spaceKey: string,
         parentOverride?: string,
-    ): Promise<{ state: PageState; version: number }> {
+    ): Promise<{ state: PageState; action: PageAction; version: number }> {
         const id = pageID(src);
         const { data, cacheHit } = await this.fetchOrCache(id, dest);
         return this.storeData(dest, spaceKey, parentOverride, data, cacheHit);
@@ -364,7 +431,7 @@ export class Puller {
         parentOverride: string | undefined,
         data: PageData,
         cacheHit: boolean,
-    ): Promise<{ state: PageState; version: number }> {
+    ): Promise<{ state: PageState; action: PageAction; version: number }> {
         const page: Page = {
             name: pageName(this.d.config.syncRoot, dest),
             id: data.id,
@@ -383,7 +450,8 @@ export class Puller {
      * store caches the page's ADF (only when its version is not already cached),
      * resolves its images, renders its Markdown, and writes the Markdown to both
      * the cache and `dest`, each only where the content differs. It returns the
-     * page state and version.
+     * mechanical page state, the user-facing {@link PageAction} (a note written
+     * where none existed is `added`, any other write is `updated`), and version.
      *
      * On a version/cache hit (`cacheHit`) the images were downloaded by an earlier
      * pull, so it rebuilds the assets map from disk ({@link assetsFromDisk}) rather
@@ -396,7 +464,10 @@ export class Puller {
         page: Page,
         dest: string,
         cacheHit: boolean,
-    ): Promise<{ state: PageState; version: number }> {
+    ): Promise<{ state: PageState; action: PageAction; version: number }> {
+        // Whether the note existed before this pull decides `added` vs `updated`;
+        // read it before mergeIntoNote, which may create it.
+        const noteExisted = await this.d.fs.exists(dest);
         const adfPath = posixJoin(this.d.cacheDir, cacheFile(page));
         const exists = await this.d.fs.exists(adfPath);
         if (!exists) {
@@ -433,19 +504,12 @@ export class Puller {
         const wroteCache = await writeIfChanged(this.d.fs, mdCache, md);
         const merge = await this.mergeIntoNote(page, dest, md);
 
-        if (merge === "conflict") {
-            return { state: "conflict", version: page.version };
-        }
-        if (merge === "merged") {
-            return { state: "merged", version: page.version };
-        }
-        if (!exists) {
-            return { state: "pulled", version: page.version };
-        }
-        if (wroteCache || merge === "wrote") {
-            return { state: "rerendered", version: page.version };
-        }
-        return { state: "unchanged", version: page.version };
+        const state = storeState(exists, wroteCache, merge);
+        return {
+            state,
+            action: storeAction(merge, noteExisted),
+            version: page.version,
+        };
     }
 
     /**
@@ -584,7 +648,13 @@ export async function pullConfig(deps: PullConfigDeps): Promise<PullOutcome> {
     // could misplace a note, so this runs only when discovery was complete.
     const relocated =
         discErrors.length === 0
-            ? await relocateMovedNotes(fs, config, cacheDir, discovered)
+            ? await relocateMovedNotes(
+                  fs,
+                  config,
+                  cacheDir,
+                  reporter,
+                  discovered,
+              )
             : { log: "", moved: 0 };
 
     reporter.discovered(Object.keys(config.pages).length + discovered.length);
@@ -608,9 +678,26 @@ export async function pullConfig(deps: PullConfigDeps): Promise<PullOutcome> {
     const pagesOut = await puller.pullPages();
     const treeOut = await puller.pullDiscovered(discovered);
 
+    // Reconcile notes whose Confluence page no longer exists: remove the clean
+    // ones (a note with unpushed edits is kept with a warning). Runs after the
+    // pull, and only on a complete discovery — a partial tree could report a
+    // still-live page as vanished.
+    const deleted =
+        discErrors.length === 0
+            ? await deleteVanishedNotes({
+                  fs,
+                  config,
+                  cacheDir,
+                  reporter,
+                  discovered,
+              })
+            : { log: "", deleted: 0 };
+
+    const stats = addStats(pagesOut.stats, treeOut.stats);
+    stats.deleted = deleted.deleted;
     return {
-        log: relocated.log + pagesOut.log + treeOut.log,
-        stats: addStats(pagesOut.stats, treeOut.stats),
+        log: relocated.log + pagesOut.log + treeOut.log + deleted.log,
+        stats,
         errors: [...discErrors, ...pagesOut.errors, ...treeOut.errors],
     };
 }
@@ -885,6 +972,7 @@ async function relocateMovedNotes(
     fs: FileSystem,
     config: Config,
     cacheDir: string,
+    reporter: Reporter,
     discovered: DiscoveredPage[],
 ): Promise<MoveOutcome> {
     const expected = new Map<string, string>();
@@ -922,6 +1010,10 @@ async function relocateMovedNotes(
 
     let log = "";
     let moved = 0;
+    const emit = (line: string): void => {
+        log += line;
+        reporter.log(line);
+    };
     for (const [id, copies] of stale) {
         const dest = expected.get(id) ?? "";
         const to = pageName(config.syncRoot, dest);
@@ -935,19 +1027,177 @@ async function relocateMovedNotes(
                 dest,
             );
             if (outcome === "moved") {
-                log += `moving ${from} -> ${to} (page ${id} moved in Confluence)\n`;
+                emit(
+                    `moving ${from} -> ${to} (page ${id} moved in Confluence)\n`,
+                );
                 moved++;
             } else if (outcome === "removed") {
-                log += `removing stale ${from} (page ${id} is now ${to})\n`;
+                emit(`removing stale ${from} (page ${id} is now ${to})\n`);
                 moved++;
             } else {
-                log +=
+                emit(
                     `warning: ${from} and ${to} both hold unpushed edits for ` +
-                    `page ${id}; left in place, resolve by hand\n`;
+                        `page ${id}; left in place, resolve by hand\n`,
+                );
             }
         }
     }
     return { log, moved };
+}
+
+/** DeleteOutcome reports the vanished-page pass's log and how many notes it removed. */
+interface DeleteOutcome {
+    log: string;
+    deleted: number;
+}
+
+/** DeleteVanishedDeps are what {@link deleteVanishedNotes} needs to reconcile. */
+interface DeleteVanishedDeps {
+    fs: FileSystem;
+    config: Config;
+    cacheDir: string;
+    reporter: Reporter;
+    /** The pages the discovery walk placed — the current remote content. */
+    discovered: DiscoveredPage[];
+}
+
+/**
+ * deleteVanishedNotes removes managed notes under the folder/space roots whose
+ * Confluence page no longer exists, so a pull's local tree tracks deletions the
+ * same way it tracks additions and edits. A note is a deletion candidate when it
+ * carries the `cfsync-plugin: pull` marker, is not `cf_local`, and its path is
+ * not among the discovered (still-live) pages. It runs after the pull, so a
+ * moved page has already been relocated onto its new (live) path and is not
+ * mistaken for vanished.
+ *
+ * Two safety rules mirror {@link findStale}: a note with unpushed local edits is
+ * never deleted — it is kept with a warning, since a pull has no confirmation
+ * step to fall back on — and a root that discovery placed no pages under while
+ * managed notes still sit there is treated as a suspect empty listing (revoked
+ * access, a transient failure) and left untouched rather than wiped. Emptied
+ * directories are pruned as notes are removed.
+ */
+async function deleteVanishedNotes(
+    deps: DeleteVanishedDeps,
+): Promise<DeleteOutcome> {
+    const { fs, config, cacheDir, reporter, discovered } = deps;
+    const roots = [
+        ...Object.keys(config.folders),
+        ...Object.keys(config.spaces),
+    ];
+    if (roots.length === 0) {
+        return { log: "", deleted: 0 };
+    }
+
+    const expected = new Set<string>();
+    for (const p of discovered) {
+        expected.add(posixClean(p.dest));
+    }
+    for (const dest of Object.keys(config.pages)) {
+        expected.add(posixClean(dest));
+    }
+
+    const files = await mdFilesUnder(fs, roots);
+    let log = "";
+    let deleted = 0;
+    const emit = (line: string): void => {
+        log += line;
+        reporter.log(line);
+    };
+
+    // Empty-discovery safety floor: a root discovery placed no pages under, while
+    // managed notes still sit there, is refused rather than wiped.
+    const suspect = new Set<string>();
+    for (const root of roots) {
+        if (discovered.some((p) => isUnderDir(posixClean(p.dest), root))) {
+            continue;
+        }
+        if (await hasManagedNote(fs, files, root)) {
+            suspect.add(root);
+            emit(
+                `warning: ${pageName(config.syncRoot, root)}: discovery ` +
+                    "returned no pages but managed notes exist; refusing to " +
+                    "delete on a possibly incomplete listing\n",
+            );
+        }
+    }
+
+    for (const path of files) {
+        const clean = posixClean(path);
+        if (expected.has(clean) || underAny(clean, suspect)) {
+            continue;
+        }
+        const marker = await pullMarker(fs, clean);
+        if (!marker.managed || marker.local) {
+            continue; // foreign, local-only, or a different cfsync marker
+        }
+        const name = pageName(config.syncRoot, clean);
+        if (await isDivergent(fs, cacheDir, config.syncRoot, clean)) {
+            emit(
+                `warning: ${name}: page removed from Confluence but note has ` +
+                    "unpushed edits; left in place\n",
+            );
+            continue;
+        }
+        await removeNote(fs, clean, config.syncRoot);
+        emit(deletedLine(name));
+        deleted++;
+    }
+    return { log, deleted };
+}
+
+/** underAny reports whether `path` lies under any directory in `dirs`. */
+function underAny(path: string, dirs: Set<string>): boolean {
+    for (const dir of dirs) {
+        if (isUnderDir(path, dir)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * pullMarker reads a note's frontmatter markers relevant to deletion: whether it
+ * carries `cfsync-plugin: pull` (a managed, pulled note) and whether it is
+ * `cf_local` (created locally, never pulled). A file with no readable
+ * frontmatter is neither.
+ */
+async function pullMarker(
+    fs: FileSystem,
+    path: string,
+): Promise<{ managed: boolean; local: boolean }> {
+    let frontmatter: string;
+    try {
+        frontmatter = splitFrontmatter(await fs.readText(path)).frontmatter;
+    } catch {
+        return { managed: false, local: false };
+    }
+    return {
+        managed: /^cfsync-plugin:\s*pull\b/m.test(frontmatter),
+        local: /^cf_local:\s*true\b/m.test(frontmatter),
+    };
+}
+
+/**
+ * hasManagedNote reports whether any file in `files` under directory `root` is a
+ * managed, non-local pulled note — the signal that backs the empty-discovery
+ * safety floor.
+ */
+async function hasManagedNote(
+    fs: FileSystem,
+    files: string[],
+    root: string,
+): Promise<boolean> {
+    for (const path of files) {
+        if (!isUnderDir(posixClean(path), root)) {
+            continue;
+        }
+        const marker = await pullMarker(fs, path);
+        if (marker.managed && !marker.local) {
+            return true;
+        }
+    }
+    return false;
 }
 
 /**

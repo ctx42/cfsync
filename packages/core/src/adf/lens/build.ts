@@ -5,8 +5,9 @@
 // the push diff inserts a top-level block, buildBlock builds the ADF node the
 // inverse of every shape the renderer emits: a fenced code block (a frozen ```adf
 // macro block round-trips here as a read-only code block), a pipe table, a bullet
-// or numbered list, a `> `-quoted panel/expand/blockquote, an added image, and
-// the plain paragraph or heading fallback. A block that cannot be rebuilt
+// or numbered list, a `> `-quoted panel/expand/blockquote, an added image, a
+// `---` thematic break (a horizontal rule), and the plain paragraph or heading
+// fallback. A block that cannot be rebuilt
 // losslessly — one nesting another structured block among them — is rejected
 // rather than guessed, and the lens laws still gate whatever is built. Shares the
 // leaf/split helpers with `reconstruct.ts`.
@@ -22,6 +23,7 @@ import {
     isBlankLine,
     isFenceLine,
     isListStart,
+    isThematicBreak,
     leadingHashes,
     orderedMarkerWidth,
 } from "../parse/blocks.ts";
@@ -79,6 +81,12 @@ function buildDispatch(
     images: Record<string, NewImage>,
 ): Node {
     const line = text.split("\n")[0] ?? "";
+    // A thematic break is checked before the marker dispatch below: its spaced
+    // form `- - -` begins with the `- ` bullet marker, yet the whole line is
+    // rule, not a list.
+    if (isThematicBreak(text)) {
+        return { type: "rule" };
+    }
     // Go's `[[TOC]]` marker is evicted in the Obsidian dialect, where a macro
     // renders as a frozen ```adf block. An inserted Table of Contents block is
     // rebuilt into a live `toc` macro (see {@link buildMacro}); every other frozen

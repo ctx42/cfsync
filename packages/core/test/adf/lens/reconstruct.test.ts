@@ -95,6 +95,15 @@ describe("put GetPut (tabular)", () => {
                        "content": [ { "type": "text", "text": "B" } ] } ] } ] } ] } ] } }`,
         },
         {
+            name: "a horizontal rule keeps its localId verbatim",
+            data: `{ "adf": { "type": "doc", "content": [
+               { "type": "paragraph", "attrs": { "localId": "p1" },
+                 "content": [ { "type": "text", "text": "before" } ] },
+               { "type": "rule", "attrs": { "localId": "r1" } },
+               { "type": "paragraph", "attrs": { "localId": "p2" },
+                 "content": [ { "type": "text", "text": "after" } ] } ] } }`,
+        },
+        {
             name: "a block alignment mark survives a no-op",
             data: `{ "adf": { "type": "doc", "content": [
                { "type": "paragraph", "attrs": { "localId": "p" },
@@ -439,6 +448,35 @@ describe("put structural", () => {
     it("reordering paragraphs swaps them", () => {
         const out = put(newADF(twoPara), "beta\n\nalpha", null, null, null);
         expect(texts(out)).toEqual(["beta", "alpha"]);
+    });
+
+    it("inserts a horizontal rule between paragraphs", () => {
+        const out = put(
+            newADF(twoPara),
+            "alpha\n\n---\n\nbeta",
+            null,
+            null,
+            null,
+        );
+        expect((out.doc.content ?? []).map((n) => n.type)).toEqual([
+            "paragraph",
+            "rule",
+            "paragraph",
+        ]);
+    });
+
+    it("deletes a horizontal rule, keeping the surrounding paragraphs", () => {
+        const base = newADF(`{ "adf": { "type": "doc", "content": [
+           { "type": "paragraph", "attrs": { "localId": "p1" },
+             "content": [ { "type": "text", "text": "alpha" } ] },
+           { "type": "rule", "attrs": { "localId": "r1" } },
+           { "type": "paragraph", "attrs": { "localId": "p2" },
+             "content": [ { "type": "text", "text": "beta" } ] } ] } }`);
+        const out = put(base, "alpha\n\nbeta", null, null, null);
+        expect((out.doc.content ?? []).map((n) => n.type)).toEqual([
+            "paragraph",
+            "paragraph",
+        ]);
     });
 
     it("splitting a paragraph yields two", () => {

@@ -2,7 +2,11 @@
 // SPDX-License-Identifier: MIT
 
 import { describe, expect, it } from "vitest";
-import { PanelReporter, type RunState } from "../../src/ui/run-state.ts";
+import {
+    PanelReporter,
+    type RunState,
+    rowKind,
+} from "../../src/ui/run-state.ts";
 
 describe("PanelReporter", () => {
     it("moves through discovery to processing and records the bar", () => {
@@ -36,6 +40,51 @@ describe("PanelReporter", () => {
         });
         r.finish();
         expect(last?.phase).toBe("done");
+    });
+
+    it("colours a pull line by its leading action word", () => {
+        let last: RunState | undefined;
+        const r = new PanelReporter("pulling", (s) => {
+            last = s;
+        });
+        r.log("added     docs/guide.md (v3)\n");
+        r.log("updated   docs/api.md (v4)\n");
+        r.log("unchanged docs/old.md (v2)\n");
+        r.log("deleted   docs/gone.md (removed from Confluence)\n");
+        r.log("conflict  docs/x.md (v5, resolve markers before pushing)\n");
+        r.log("warning: docs/y.md: left in place\n");
+        expect(last?.rows.map((row) => row.kind)).toEqual([
+            "added",
+            "updated",
+            "unchanged",
+            "deleted",
+            "conflict",
+            "warn",
+        ]);
+    });
+
+    it("rowKind leaves a push or discovery line as a neutral info row", () => {
+        expect(rowKind("pushing Home ... ok (v14)\n")).toBe("info");
+        expect(rowKind("discovering docs to resolve x\n")).toBe("info");
+    });
+
+    it("setTally records the per-action footer breakdown and error count", () => {
+        let last: RunState | undefined;
+        const r = new PanelReporter("pulling", (s) => {
+            last = s;
+        });
+        r.setTally(
+            { added: 2, updated: 1, unchanged: 3, conflict: 0, deleted: 1 },
+            2,
+        );
+        expect(last?.tally).toEqual({
+            added: 2,
+            updated: 1,
+            unchanged: 3,
+            conflict: 0,
+            deleted: 1,
+        });
+        expect(last?.counts.err).toBe(2);
     });
 
     it("streamsLog returns true so the caller does not double-print", () => {

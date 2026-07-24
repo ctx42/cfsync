@@ -44,10 +44,35 @@ export function newBlock(text: string, line = 1): MdBlock {
  * canonicalized specially (see {@link normalizeTable}).
  */
 export function normalizeBlock(text: string): string {
+    if (isThematicBreak(text)) {
+        return "---";
+    }
     if (isTableBlock(text)) {
         return normalizeTable(text);
     }
     return normalizeInlineText(text);
+}
+
+/**
+ * isThematicBreak reports whether a block is a horizontal rule: a single
+ * non-blank line of three or more of the same `-`, `*` or `_` marker, spaces
+ * between them allowed (the CommonMark thematic break). Every spelling — `---`,
+ * `***`, `___`, `- - -`, a longer run — normalizes to the one `---` the rule
+ * render emits, so a rule reads as unchanged whichever form the note holds. A
+ * bullet marker `- ` carries content and so is never a break.
+ */
+export function isThematicBreak(text: string): boolean {
+    let seen = "";
+    for (const raw of text.split("\n")) {
+        if (isBlankLine(raw)) {
+            continue;
+        }
+        if (seen !== "") {
+            return false; // more than one non-blank line
+        }
+        seen = raw;
+    }
+    return /^\s*([-*_])(\s*\1){2,}\s*$/.test(seen);
 }
 
 /**

@@ -9,6 +9,7 @@
 // spurious modify.
 
 import {
+    isThematicBreak,
     leadingHashes,
     type MdBlock,
     orderedMarkerWidth,
@@ -231,9 +232,13 @@ function mergeLeftoverDels(placed: Edit[], dels: Edit[]): Edit[] {
  * carries, so the diff pairs a modified block only with an insert of the same
  * shape. The label need not equal the ADF node type; it need only be stable
  * between a block and its edited form. A frozen `adf` fenced block is kept
- * distinct from a real code block, and the `%%adf:` comment is the placeholder.
+ * distinct from a real code block, the `%%adf:` comment is the placeholder, and
+ * a thematic break is the rule.
  */
 export function blockKind(text: string): string {
+    if (isThematicBreak(text)) {
+        return "rule";
+    }
     let line = text.split("\n")[0] ?? "";
     line = line.replace(/^ +/, "");
     const hashes = leadingHashes(line);

@@ -25,6 +25,7 @@ import type { Links } from "../links.ts";
 import {
     isBlankLine,
     isSeparatorRow,
+    isThematicBreak,
     leadingHashes,
     type MdBlock,
     newBlock,
@@ -394,10 +395,14 @@ function nonRenderedGroups(
 /**
  * insertableAsLeaf reports whether an inserted block can be rebuilt as a plain
  * paragraph or heading. It rejects a block whose first line carries a
- * structured-block marker; top-level, such a block gets its own builder, while
- * inside an inserted container it marks nesting the flat rebuild cannot express.
+ * structured-block marker, and a `---` thematic break (a rule, not leaf text);
+ * top-level, such a block gets its own builder, while inside an inserted
+ * container it marks nesting the flat rebuild cannot express.
  */
 export function insertableAsLeaf(text: string): boolean {
+    if (isThematicBreak(text)) {
+        return false;
+    }
     const line = (text.split("\n")[0] ?? "").replace(/^ +/, "");
     if (orderedMarkerWidth(line) > 0) {
         return false;

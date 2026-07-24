@@ -259,6 +259,32 @@
 .cfsync-err .cfsync-row-text {
     color: var(--text-error);
 }
+/* Pull actions: a colour per outcome so the file list reads at a glance. */
+.cfsync-added .cfsync-dot {
+    background: var(--color-green);
+}
+.cfsync-updated .cfsync-dot {
+    background: var(--color-blue);
+}
+.cfsync-unchanged .cfsync-dot {
+    background: var(--text-faint);
+}
+.cfsync-unchanged .cfsync-row-text {
+    color: var(--text-muted);
+}
+.cfsync-conflict .cfsync-dot {
+    background: var(--color-orange);
+}
+.cfsync-conflict .cfsync-row-text {
+    color: var(--color-orange);
+}
+.cfsync-deleted .cfsync-dot {
+    background: var(--color-red);
+}
+.cfsync-deleted .cfsync-row-text {
+    color: var(--text-muted);
+    text-decoration: line-through;
+}
 
 /* Footer: count badges. */
 .cfsync-footer {
@@ -290,6 +316,21 @@
     color: var(--color-yellow);
 }
 .cfsync-badge.cfsync-err {
+    color: var(--color-red);
+}
+.cfsync-badge.cfsync-added {
+    color: var(--color-green);
+}
+.cfsync-badge.cfsync-updated {
+    color: var(--color-blue);
+}
+.cfsync-badge.cfsync-unchanged {
+    color: var(--text-muted);
+}
+.cfsync-badge.cfsync-conflict {
+    color: var(--color-orange);
+}
+.cfsync-badge.cfsync-deleted {
     color: var(--color-red);
 }
 

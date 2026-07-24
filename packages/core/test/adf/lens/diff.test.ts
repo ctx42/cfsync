@@ -110,6 +110,18 @@ describe("diffBlocks", () => {
             user: blocksOf("new para", "- new item", "tail"),
             want: [insert(0), modify(0, 1), keep(1, 2)],
         },
+        {
+            testN: "a rule and paragraph do not pair",
+            base: blocksOf("head", "---"),
+            user: blocksOf("head", "now text"),
+            want: [keep(0, 0), del(1), insert(1)],
+        },
+        {
+            testN: "a rule respelled is still an unchanged keep",
+            base: blocksOf("head", "---", "tail"),
+            user: blocksOf("head", "***", "tail"),
+            want: [keep(0, 0), keep(1, 1), keep(2, 2)],
+        },
     ];
 
     for (const tc of tt) {

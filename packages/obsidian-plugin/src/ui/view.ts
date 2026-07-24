@@ -7,7 +7,7 @@
 // committing. All logic lives in operations.ts / run-state.ts; this file is the
 // DOM shell.
 
-import type { PreflightEntry } from "@cfsync/core";
+import type { PageAction, PreflightEntry } from "@cfsync/core";
 import { ItemView, Notice, setIcon, type WorkspaceLeaf } from "obsidian";
 import type cfsyncPlugin from "../main.ts";
 import { buildRuntime, type PluginRuntime } from "../runtime.ts";
@@ -19,7 +19,7 @@ import {
     type Scope,
     toDest,
 } from "./operations.ts";
-import { PanelReporter, type RunState } from "./run-state.ts";
+import { PanelReporter, type PullTally, type RunState } from "./run-state.ts";
 
 export const VIEW_TYPE = "cfsync-panel";
 
@@ -71,20 +71,22 @@ export class cfsyncView extends ItemView {
             if (this.opScope === "current") {
                 const dest = this.activeDest();
                 if (dest === null) throw new Error("no active note");
-                const state = await pullNote(rt, reporter, dest);
-                reporter.setCounts(
-                    state === "pulled"
-                        ? { ok: 1, warn: 0, err: 0 }
-                        : { ok: 0, warn: 1, err: 0 },
-                );
+                const action = await pullNote(rt, reporter, dest);
+                reporter.setTally(singleTally(action), 0);
             } else {
                 const outcome = await pullVault(rt, reporter);
                 for (const e of outcome.errors) reporter.fail(e);
-                reporter.setCounts({
-                    ok: outcome.stats.pulled,
-                    warn: outcome.stats.unchanged + outcome.stats.rendered,
-                    err: outcome.errors.length,
-                });
+                const s = outcome.stats;
+                reporter.setTally(
+                    {
+                        added: s.added,
+                        updated: s.updated,
+                        unchanged: s.unchanged,
+                        conflict: s.conflict,
+                        deleted: s.deleted,
+                    },
+                    outcome.errors.length,
+                );
             }
         });
     }
@@ -212,24 +214,39 @@ export class cfsyncView extends ItemView {
             this.renderError(root, state);
         } else if (state.phase === "done") {
             const foot = root.createDiv({ cls: "cfsync-footer" });
-            // Label the tally by run kind: a pull "pulled"/"failed", a push
-            // "pushed"/"refused" — the hardcoded push wording misreports pulls.
-            const push = state.verb === "pushing";
-            this.badge(
-                foot,
-                "ok",
-                "check",
-                state.counts.ok,
-                push ? "pushed" : "pulled",
-            );
-            this.badge(foot, "warn", "minus", state.counts.warn, "unchanged");
-            this.badge(
-                foot,
-                "err",
-                "x",
-                state.counts.err,
-                push ? "refused" : "failed",
-            );
+            if (state.tally !== null) {
+                // A pull: one badge per action plus the failure count.
+                const t = state.tally;
+                this.badge(foot, "added", "file-plus", t.added, "added");
+                this.badge(foot, "updated", "file-pen", t.updated, "updated");
+                this.badge(foot, "deleted", "file-x", t.deleted, "deleted");
+                this.badge(
+                    foot,
+                    "conflict",
+                    "alert-triangle",
+                    t.conflict,
+                    "conflicted",
+                );
+                this.badge(
+                    foot,
+                    "unchanged",
+                    "minus",
+                    t.unchanged,
+                    "unchanged",
+                );
+                this.badge(foot, "err", "x", state.counts.err, "failed");
+            } else {
+                // A push: pushed / unchanged / refused.
+                this.badge(foot, "ok", "check", state.counts.ok, "pushed");
+                this.badge(
+                    foot,
+                    "warn",
+                    "minus",
+                    state.counts.warn,
+                    "unchanged",
+                );
+                this.badge(foot, "err", "x", state.counts.err, "refused");
+            }
         }
     }
 
@@ -395,6 +412,17 @@ export class cfsyncView extends ItemView {
         setIcon(b.createSpan({ cls: "cfsync-badge-ico" }), icon);
         b.createSpan({ text: String(count) });
     }
+}
+
+/** singleTally builds a one-page pull's footer tally from its action. */
+function singleTally(action: PageAction): PullTally {
+    return {
+        added: action === "added" ? 1 : 0,
+        updated: action === "updated" ? 1 : 0,
+        unchanged: action === "unchanged" ? 1 : 0,
+        conflict: action === "conflict" ? 1 : 0,
+        deleted: 0,
+    };
 }
 
 /** chipKind maps a preflight class to a row style. */

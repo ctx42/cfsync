@@ -423,6 +423,10 @@ export function renderBlock(nod: Node, ctx: MdCtx): string {
             return renderMedia(nod, ctx.assets ?? {});
         case "extension":
             return renderExtension(nod);
+        case "rule":
+            // A horizontal rule carries no content; `---` is the Markdown
+            // thematic break the build lens reparses back to a rule node.
+            return "---";
         default:
             return renderAnchor(nod);
     }

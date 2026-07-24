@@ -11,12 +11,55 @@
 import type { Reporter } from "@cfsync/core";
 
 export type RunPhase = "idle" | "discovering" | "processing" | "done" | "error";
-export type RowKind = "ok" | "warn" | "err" | "info";
+export type RowKind =
+    | "ok"
+    | "warn"
+    | "err"
+    | "info"
+    | "added"
+    | "updated"
+    | "unchanged"
+    | "deleted"
+    | "conflict";
+
+/** PullTally is a pull's per-action breakdown, shown in the footer. */
+export interface PullTally {
+    added: number;
+    updated: number;
+    unchanged: number;
+    conflict: number;
+    deleted: number;
+}
 
 /** LogRow is one line in the panel's scrolling log. */
 export interface LogRow {
     text: string;
     kind: RowKind;
+}
+
+/**
+ * rowKind classifies a streamed log line by its leading word, so a pull's
+ * `added`/`updated`/`unchanged`/`conflict`/`deleted` lines render in their own
+ * colour and a `warning:` line as a warning. Anything else (a push line, a
+ * discovery note) stays a neutral `info` row.
+ */
+export function rowKind(line: string): RowKind {
+    switch (line.trimStart().split(/\s/, 1)[0]) {
+        case "added":
+            return "added";
+        case "updated":
+            return "updated";
+        case "unchanged":
+            return "unchanged";
+        case "conflict":
+            return "conflict";
+        case "deleted":
+            return "deleted";
+        case "warning:":
+            return "warn";
+        default:
+            return "info";
+    }
 }
 
 /** RunState is the panel's full render model for one operation. */
@@ -29,6 +72,8 @@ export interface RunState {
     current: string;
     rows: LogRow[];
     counts: { ok: number; warn: number; err: number };
+    /** The pull's per-action breakdown for the footer, or null for a push. */
+    tally: PullTally | null;
     /** errorText holds the fatal-run message when phase is "error", else "". */
     errorText: string;
 }
@@ -48,6 +93,7 @@ export class PanelReporter implements Reporter {
             current: "",
             rows: [],
             counts: { ok: 0, warn: 0, err: 0 },
+            tally: null,
             errorText: "",
         };
         this.onChange = onChange;
@@ -71,7 +117,10 @@ export class PanelReporter implements Reporter {
     }
 
     log(line: string): void {
-        this.s.rows.push({ text: line.replace(/\n+$/, ""), kind: "info" });
+        this.s.rows.push({
+            text: line.replace(/\n+$/, ""),
+            kind: rowKind(line),
+        });
         this.emit();
     }
 
@@ -106,6 +155,17 @@ export class PanelReporter implements Reporter {
     /** setCounts sets the footer tally after a run's outcome is known. */
     setCounts(c: { ok: number; warn: number; err: number }): void {
         this.s.counts = c;
+        this.emit();
+    }
+
+    /**
+     * setTally records a pull's per-action breakdown for the footer and mirrors
+     * its error count into the shared `counts`, so the done-phase footer can show
+     * added/updated/unchanged/conflict/deleted alongside the failure count.
+     */
+    setTally(tally: PullTally, err: number): void {
+        this.s.tally = tally;
+        this.s.counts = { ok: 0, warn: 0, err };
         this.emit();
     }
 
