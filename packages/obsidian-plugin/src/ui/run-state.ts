@@ -62,6 +62,28 @@ export function rowKind(line: string): RowKind {
     }
 }
 
+/**
+ * rowName extracts the syncRoot-relative page name from a log row so the view
+ * can turn it into a link that opens the note. It reads the three streamed
+ * shapes — a pull line (`<action> <name> (detail)`), a push line
+ * (`pushing|creating <name> ... <result>`), and an outcome failure row
+ * (`<name>: <reason>`, only trusted for an `err` row) — and returns null for an
+ * indented continuation line or anything else with no page to open. Names may
+ * contain spaces (vault paths do), so it never splits on whitespace.
+ */
+export function rowName(text: string, kind: RowKind): string | null {
+    if (/^\s/.test(text)) return null; // indented continuation (warning/reused)
+    const push = text.match(/^(?:pushing|creating) (.+?) \.\.\. /);
+    if (push?.[1] !== undefined) return push[1];
+    const pull = text.match(/^\S+\s+(.+?) \([^()]*\)$/);
+    if (pull?.[1] !== undefined) return pull[1];
+    if (kind === "err") {
+        const fail = text.match(/^(.+?): /);
+        if (fail?.[1] !== undefined) return fail[1];
+    }
+    return null;
+}
+
 /** RunState is the panel's full render model for one operation. */
 export interface RunState {
     verb: string;

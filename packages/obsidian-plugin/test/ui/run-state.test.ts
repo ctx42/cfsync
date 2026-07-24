@@ -6,6 +6,7 @@ import {
     PanelReporter,
     type RunState,
     rowKind,
+    rowName,
 } from "../../src/ui/run-state.ts";
 
 describe("PanelReporter", () => {
@@ -66,6 +67,45 @@ describe("PanelReporter", () => {
     it("rowKind leaves a push or discovery line as a neutral info row", () => {
         expect(rowKind("pushing Home ... ok (v14)\n")).toBe("info");
         expect(rowKind("discovering docs to resolve x\n")).toBe("info");
+    });
+
+    it("rowName reads the page name from a pull line", () => {
+        expect(rowName("added     docs/guide.md (v3)", "added")).toBe(
+            "docs/guide.md",
+        );
+        expect(
+            rowName(
+                "deleted   docs/gone.md (removed from Confluence)",
+                "deleted",
+            ),
+        ).toBe("docs/gone.md");
+    });
+
+    it("rowName reads the page name from push and create lines", () => {
+        expect(rowName("pushing team/x.md ... ok (v3)", "info")).toBe(
+            "team/x.md",
+        );
+        expect(rowName("creating team/y.md ... skipped", "info")).toBe(
+            "team/y.md",
+        );
+    });
+
+    it("rowName reads the name from an err failure row", () => {
+        expect(rowName("team/x.md: remote moved", "err")).toBe("team/x.md");
+    });
+
+    it("rowName keeps spaces in a page name", () => {
+        expect(
+            rowName("updated   My Notes/Weekly log.md (v4)", "updated"),
+        ).toBe("My Notes/Weekly log.md");
+    });
+
+    it("rowName returns null for a continuation or nameless line", () => {
+        expect(rowName("      warning: left in place", "warn")).toBeNull();
+        expect(
+            rowName('      reused existing folder "Team"', "info"),
+        ).toBeNull();
+        expect(rowName("discovering docs to resolve x", "info")).toBeNull();
     });
 
     it("setTally records the per-action footer breakdown and error count", () => {

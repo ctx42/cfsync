@@ -8,7 +8,7 @@
 // DOM shell.
 
 import type { PageAction, PreflightEntry } from "@cfsync/core";
-import { ItemView, Notice, setIcon, type WorkspaceLeaf } from "obsidian";
+import { ItemView, Notice, setIcon, TFile, type WorkspaceLeaf } from "obsidian";
 import type cfsyncPlugin from "../main.ts";
 import { buildRuntime, type PluginRuntime } from "../runtime.ts";
 import {
@@ -19,7 +19,13 @@ import {
     type Scope,
     toDest,
 } from "./operations.ts";
-import { PanelReporter, type PullTally, type RunState } from "./run-state.ts";
+import {
+    PanelReporter,
+    type PullTally,
+    type RowKind,
+    type RunState,
+    rowName,
+} from "./run-state.ts";
 
 export const VIEW_TYPE = "cfsync-panel";
 
@@ -279,15 +285,49 @@ export class cfsyncView extends ItemView {
         }
     }
 
-    /** renderLog draws the per-page result rows. */
+    /** renderLog draws the per-page result rows. A row whose page name resolves
+     * to a note in the vault renders that name as a link that opens the file. */
     private renderLog(root: HTMLElement, state: RunState): void {
         if (state.rows.length === 0) return;
         const log = root.createDiv({ cls: "cfsync-log" });
         for (const row of state.rows) {
             const r = log.createDiv({ cls: `cfsync-row cfsync-${row.kind}` });
             r.createSpan({ cls: "cfsync-dot" });
-            r.createSpan({ cls: "cfsync-row-text", text: row.text });
+            const text = r.createSpan({ cls: "cfsync-row-text" });
+            this.fillRowText(text, row.text, row.kind);
         }
+    }
+
+    /** fillRowText renders a log line, linking its page name to the vault note
+     * when one exists so the row opens the file; otherwise it is plain text. */
+    private fillRowText(el: HTMLElement, text: string, kind: RowKind): void {
+        const name = rowName(text, kind);
+        const file = name === null ? null : this.noteFor(name);
+        const at = name === null ? -1 : text.indexOf(name);
+        if (file === null || name === null || at < 0) {
+            el.setText(text);
+            return;
+        }
+        if (at > 0) el.createSpan({ text: text.slice(0, at) });
+        const link = el.createEl("a", {
+            cls: "cfsync-row-file",
+            text: name,
+            href: "#",
+        });
+        link.onclick = (e) => {
+            e.preventDefault();
+            void this.app.workspace.getLeaf(false).openFile(file);
+        };
+        el.createSpan({ text: text.slice(at + name.length) });
+    }
+
+    /** noteFor resolves a syncRoot-relative page name to its vault note, or null
+     * when no such file exists (e.g. a deleted page or an unresolvable name). */
+    private noteFor(name: string): TFile | null {
+        const root = this.plugin.settings.syncRoot;
+        const path = root === "" ? name : `${root}/${name}`;
+        const file = this.app.vault.getAbstractFileByPath(path);
+        return file instanceof TFile ? file : null;
     }
 
     /** renderError draws the fatal-run banner beneath the preserved log. */

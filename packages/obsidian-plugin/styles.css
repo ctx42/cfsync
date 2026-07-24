@@ -247,6 +247,16 @@
     line-height: 1.5;
     word-break: break-word;
 }
+/* A resolved page name is a link that opens the note; it keeps the row's
+   monospace face and inherits its colour, underlining only on hover. */
+.cfsync-row-file {
+    color: inherit;
+    text-decoration: none;
+    cursor: pointer;
+}
+.cfsync-row-file:hover {
+    text-decoration: underline;
+}
 .cfsync-info .cfsync-dot {
     background: var(--color-green);
 }
@@ -258,6 +268,10 @@
 }
 .cfsync-err .cfsync-row-text {
     color: var(--text-error);
+    /* A failure line is worth copying to investigate: opt it out of the
+       panel's inherited user-select:none so it can be selected. */
+    user-select: text;
+    cursor: text;
 }
 /* Pull actions: a colour per outcome so the file list reads at a glance. */
 .cfsync-added .cfsync-dot {
@@ -361,6 +375,9 @@
 .cfsync-error-text {
     line-height: 1.4;
     word-break: break-word;
+    /* Fatal-run message: selectable so it can be copied out of the panel. */
+    user-select: text;
+    cursor: text;
 }
 
 /* Push preview: selectable rows with the base→remote version delta. */
