@@ -52,6 +52,7 @@ import {
     rowAllHeader,
     spanMarker,
 } from "../render/table.ts";
+import { collectAnnotationRuns, reanchorAnnotations } from "./annotate.ts";
 import { buildBlock, healAdfCodeBlock } from "./build.ts";
 import { diffBlocks, type Edit } from "./diff.ts";
 import { baselineBlocks, type Origin } from "./sourcemap.ts";
@@ -511,9 +512,12 @@ function editBlock(
  * rebuildLeaf replaces node's inline content with the parse of userText, keeping
  * node's type and attributes (localId and the rest) intact. Hard breaks are
  * recovered from the segment separator appropriate to the node kind, and soft
- * wrapping is undone before each segment is parsed.
+ * wrapping is undone before each segment is parsed. Any inline-comment annotation
+ * the old content carried is re-anchored onto the reparsed text where its
+ * commented span survives the edit (see {@link reanchorAnnotations}).
  */
 export function rebuildLeaf(node: Node, userText: string, pc: ParseCtx): void {
+    const anns = collectAnnotationRuns(node.content ?? []);
     let sep = "\\\n"; // a paragraph hard break: trailing backslash then newline
     let text = userText;
     let level = 0;
@@ -536,7 +540,7 @@ export function rebuildLeaf(node: Node, userText: string, pc: ParseCtx): void {
         }
     }
 
-    node.content = parseSegments(text, sep, pc);
+    node.content = reanchorAnnotations(parseSegments(text, sep, pc), anns);
     if (node.type === "paragraph") {
         setIndentation(node, level);
     }
@@ -609,10 +613,12 @@ function parseSegments(text: string, sep: string, pc: ParseCtx): Node[] {
  * rebuildInline replaces a leaf's inline content with the parse of text,
  * recovering paragraph hard breaks. Unlike {@link rebuildLeaf} it interprets
  * neither a heading level nor an indentation marker, so it suits a paragraph
- * nested in a container, where those markers do not apply.
+ * nested in a container, where those markers do not apply. An inline-comment
+ * annotation on the old content is re-anchored as in {@link rebuildLeaf}.
  */
 export function rebuildInline(node: Node, text: string, pc: ParseCtx): void {
-    node.content = parseSegments(text, "\\\n", pc);
+    const anns = collectAnnotationRuns(node.content ?? []);
+    node.content = reanchorAnnotations(parseSegments(text, "\\\n", pc), anns);
 }
 
 /**

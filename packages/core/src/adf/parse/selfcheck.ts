@@ -102,15 +102,23 @@ export function inlineSig(nodes: Node[], links: Links | null): InlineTok[] {
  * link (compared separately via the href) and indentation (expressed by the
  * paragraph's `N>` marker), sorted and comma-joined, so two nodes with the same
  * marks in any order compare equal. A textColor rides with its color, so
- * recoloring is detected. It still includes marks the renderer emits no
- * delimiter for — the node-level layout marks — on purpose: their presence makes
- * the signature differ from a reparse, so a block carrying one is judged not
- * round-trippable and stays read-only rather than silently losing the mark.
+ * recoloring is detected. An annotation (an inline comment) is excluded too:
+ * the Markdown drops it, but the Put lens re-anchors it onto the reparsed text
+ * (see reconstruct's reanchorAnnotations), so a paragraph carrying one stays
+ * editable rather than frozen. It still includes the marks the renderer emits no
+ * delimiter for and that are *not* re-anchored — the node-level layout marks — on
+ * purpose: their presence makes the signature differ from a reparse, so a block
+ * carrying one is judged not round-trippable and stays read-only rather than
+ * silently losing the mark.
  */
 export function markSig(nod: Node): string {
     const types: string[] = [];
     for (const m of nod.marks ?? []) {
-        if (m.type === "link" || m.type === "indentation") {
+        if (
+            m.type === "link" ||
+            m.type === "indentation" ||
+            m.type === "annotation"
+        ) {
             continue;
         }
         types.push(markCode(m));
