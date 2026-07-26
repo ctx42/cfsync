@@ -392,3 +392,217 @@ describe("fetchAttachments", () => {
         );
     });
 });
+
+describe("fetchComments", () => {
+    const v2 = "https://ex.atlassian.net/wiki/api/v2";
+    const adf = "?body-format=atlas_doc_format";
+    const inlineBase = `${v2}/pages/123/inline-comments${adf}`;
+    const footerBase = `${v2}/pages/123/footer-comments${adf}`;
+    /** A minimal ADF body value the client keeps as its raw JSON string. */
+    const body = (text: string): { atlas_doc_format: { value: string } } => ({
+        atlas_doc_format: {
+            value: JSON.stringify({
+                type: "doc",
+                content: [
+                    { type: "paragraph", content: [{ type: "text", text }] },
+                ],
+            }),
+        },
+    });
+    /** An empty children listing, the leaf of every fetched thread. */
+    const noChildren = { body: JSON.stringify({ results: [], _links: {} }) };
+
+    it("reads inline and footer comments with their nested replies", async () => {
+        const stub = new StubHttpClient()
+            .on("GET", inlineBase, {
+                body: JSON.stringify({
+                    results: [
+                        {
+                            id: "C1",
+                            status: "current",
+                            resolutionStatus: "open",
+                            properties: {
+                                inlineMarkerRef: "M1",
+                                inlineOriginalSelection: "commented span",
+                            },
+                            version: {
+                                authorId: "U1",
+                                createdAt: "2026-07-20T10:00:00Z",
+                            },
+                            body: body("where is this from?"),
+                        },
+                    ],
+                    _links: {},
+                }),
+            })
+            .on("GET", `${v2}/inline-comments/C1/children${adf}`, {
+                body: JSON.stringify({
+                    results: [
+                        {
+                            id: "C2",
+                            version: {
+                                authorId: "U2",
+                                createdAt: "2026-07-21T09:00:00Z",
+                            },
+                            body: body("the appendix"),
+                        },
+                    ],
+                    _links: {},
+                }),
+            })
+            .on("GET", `${v2}/inline-comments/C2/children${adf}`, noChildren)
+            .on("GET", footerBase, {
+                body: JSON.stringify({
+                    results: [
+                        {
+                            id: "F1",
+                            version: {
+                                authorId: "U3",
+                                createdAt: "2026-07-22T08:00:00Z",
+                            },
+                            body: body("looks good"),
+                        },
+                    ],
+                    _links: {},
+                }),
+            })
+            .on("GET", `${v2}/footer-comments/F1/children${adf}`, noChildren);
+
+        const comments = await clientWith(stub).fetchComments("123");
+
+        expect(comments.inline).toHaveLength(1);
+        const c1 = comments.inline[0];
+        expect(c1).toMatchObject({
+            id: "C1",
+            kind: "inline",
+            resolution: "open",
+            markerRef: "M1",
+            anchorText: "commented span",
+            authorId: "U1",
+            createdAt: "2026-07-20T10:00:00Z",
+        });
+        expect(c1?.adf).toContain("where is this from?");
+        expect(c1?.replies).toHaveLength(1);
+        expect(c1?.replies[0]).toMatchObject({ id: "C2", kind: "inline" });
+        expect(c1?.replies[0]?.adf).toContain("the appendix");
+
+        expect(comments.footer).toHaveLength(1);
+        expect(comments.footer[0]).toMatchObject({
+            id: "F1",
+            kind: "footer",
+            resolution: "",
+            markerRef: "",
+            anchorText: "",
+            authorId: "U3",
+        });
+    });
+
+    it("follows the pagination cursor of a comment listing", async () => {
+        const nextPath = "/wiki/api/v2/pages/123/inline-comments?cursor=n";
+        const stub = new StubHttpClient()
+            .on("GET", inlineBase, {
+                body: JSON.stringify({
+                    results: [{ id: "C1", body: body("a") }],
+                    _links: { next: nextPath },
+                }),
+            })
+            .on("GET", `${v2}/inline-comments/C1/children${adf}`, noChildren)
+            .on("GET", `https://ex.atlassian.net${nextPath}`, {
+                body: JSON.stringify({
+                    results: [{ id: "C3", body: body("b") }],
+                    _links: {},
+                }),
+            })
+            .on("GET", `${v2}/inline-comments/C3/children${adf}`, noChildren)
+            .on("GET", footerBase, {
+                body: JSON.stringify({ results: [], _links: {} }),
+            });
+
+        const comments = await clientWith(stub).fetchComments("123");
+
+        expect(comments.inline.map((c) => c.id)).toEqual(["C1", "C3"]);
+    });
+
+    it("rejects a non-2xx status", async () => {
+        const stub = new StubHttpClient()
+            .on("GET", inlineBase, { status: 500 })
+            .on("GET", footerBase, {
+                body: JSON.stringify({ results: [], _links: {} }),
+            });
+        await expect(clientWith(stub).fetchComments("123")).rejects.toThrow(
+            "inline comments: HTTP 500",
+        );
+    });
+});
+
+describe("createReply", () => {
+    const v2 = "https://ex.atlassian.net/wiki/api/v2";
+    const replyADF = JSON.stringify({
+        type: "doc",
+        content: [
+            { type: "paragraph", content: [{ type: "text", text: "agreed" }] },
+        ],
+    });
+
+    it("posts an inline reply carrying the parent id and returns the new id", async () => {
+        const stub = new StubHttpClient().on("POST", `${v2}/inline-comments`, {
+            body: '{"id":"C9"}',
+        });
+
+        const id = await clientWith(stub).createReply({
+            parentId: "C1",
+            kind: "inline",
+            adf: replyADF,
+        });
+
+        expect(id).toBe("C9");
+        const req = stub.requests[0];
+        expect(req?.method).toBe("POST");
+        const sent = JSON.parse(String(req?.body));
+        // Only parentCommentId — the v2 create endpoint rejects a reply that
+        // also carries pageId.
+        expect(sent).toEqual({
+            parentCommentId: "C1",
+            body: { representation: "atlas_doc_format", value: replyADF },
+        });
+        expect(sent.pageId).toBeUndefined();
+    });
+
+    it("posts a footer reply to the footer-comments endpoint", async () => {
+        const stub = new StubHttpClient().on("POST", `${v2}/footer-comments`, {
+            body: '{"id":"F9"}',
+        });
+
+        await clientWith(stub).createReply({
+            parentId: "F1",
+            kind: "footer",
+            adf: replyADF,
+        });
+
+        expect(stub.requests[0]?.url).toBe(`${v2}/footer-comments`);
+    });
+
+    it("rejects a non-2xx status and a response with no id", async () => {
+        const fail = new StubHttpClient().on("POST", `${v2}/inline-comments`, {
+            status: 500,
+        });
+        await expect(
+            clientWith(fail).createReply({
+                parentId: "C1",
+                kind: "inline",
+                adf: replyADF,
+            }),
+        ).rejects.toThrow("reply to comment C1: HTTP 500");
+
+        const noId = new StubHttpClient().on("POST", `${v2}/inline-comments`, {
+            body: "{}",
+        });
+        await expect(
+            clientWith(noId).createReply({
+                parentId: "C1",
+                kind: "inline",
+                adf: replyADF,
+            }),
+        ).rejects.toThrow("response has no id");
+    });
+});

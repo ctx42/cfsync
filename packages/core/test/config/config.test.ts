@@ -273,6 +273,24 @@ describe("buildConfig", () => {
         }
     });
 
+    it("defaults comments to false when unset", () => {
+        expect(buildConfig({}, secretsFor("/base/wd")).comments).toBe(false);
+    });
+
+    it("keeps comments when set to true", () => {
+        expect(
+            buildConfig({ comments: true }, secretsFor("/base/wd")).comments,
+        ).toBe(true);
+    });
+
+    it("rejects a non-boolean comments value", () => {
+        for (const comments of ["true", 1, {}]) {
+            expect(() =>
+                buildConfig({ comments }, secretsFor("/base/wd")),
+            ).toThrow('"comments" must be a boolean');
+        }
+    });
+
     it("rejects a forbidden key in the file config", () => {
         expect(() =>
             buildConfig({ token: "x" }, secretsFor("/base/wd")),

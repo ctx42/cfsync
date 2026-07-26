@@ -34,6 +34,7 @@ describe("toPortableConfig", () => {
         expect(out).toEqual({
             timeout: "45s",
             markdown: { flavor: "gfm", margin: 80 },
+            comments: false,
             pages: { "a.md": "/wiki/p" },
             folders: { docs: "/wiki/f" },
             spaces: { team: "/wiki/s" },
@@ -45,6 +46,7 @@ describe("toPortableConfig", () => {
         expect(Object.keys(out)).toEqual([
             "timeout",
             "markdown",
+            "comments",
             "pages",
             "folders",
             "spaces",

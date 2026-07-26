@@ -18,6 +18,8 @@
 // discovery is in `./discover.ts`; this module is the page pull and the
 // `pullConfig`/`pullSelected` entry points.
 
+import { stripCommentDecorations } from "../adf/render/comments.ts";
+import type { CommentThread, RenderComments } from "../adf/render/markdown.ts";
 import {
     cacheFile,
     cacheFileName,
@@ -27,10 +29,15 @@ import {
     writePage,
 } from "../cache/cache.ts";
 import type { Config } from "../config/config.ts";
-import type { ConfluenceClient, PageData } from "../confluence/client.ts";
+import type {
+    ConfluenceClient,
+    PageComment,
+    PageComments,
+    PageData,
+} from "../confluence/client.ts";
 import { pageID, tryPageID } from "../confluence/sources.ts";
 import { type Flavor, resolveFlavor } from "../flavor/flavor.ts";
-import { fileMedia } from "../models/adf.ts";
+import { fileMedia, type Node } from "../models/adf.ts";
 import type { FileSystem } from "../ports/fs.ts";
 import type { Reporter } from "../ports/progress.ts";
 import { posixClean, posixDir, posixJoin } from "../util/path.ts";
@@ -499,15 +506,28 @@ export class Puller {
             this.d.config.domain,
             this.d.config.host,
         );
+        // Comments are not versioned with the page, so a warm (cache-hit) pull
+        // still fetches them to catch new or resolved threads. The fetch is
+        // best-effort: a page whose comments cannot be listed still renders its
+        // body, just without the callouts.
+        const comments = await this.fetchRenderComments(page.id);
         const md = this.d.flavor.render(doc, {
             assets,
             links,
             margin: this.d.config.margin,
+            ...(comments ? { comments } : {}),
         })[0];
 
         const mdCache = `${adfPath.slice(0, -".json".length)}.md`;
-        const wroteCache = await writeIfChanged(this.d.fs, mdCache, md);
+        // Reconcile the note BEFORE refreshing the cached render. mergeIntoNote
+        // reads the cached render of the note's version as its merge base, and on
+        // a re-pull at the same version that file IS mdCache. Writing the new
+        // render first would overwrite the base with the new content, so the merge
+        // would see "remote unchanged" and keep the stale note — which is why
+        // toggling comments on never reached an already-pulled note. Refresh the
+        // cache after, so the base stays the previous render during the merge.
         const merge = await this.mergeIntoNote(page, dest, md);
+        const wroteCache = await writeIfChanged(this.d.fs, mdCache, md);
 
         const state = storeState(exists, wroteCache, merge);
         return {
@@ -515,6 +535,41 @@ export class Puller {
             action: storeAction(merge, noteExisted),
             version: page.version,
         };
+    }
+
+    /**
+     * fetchRenderComments returns the page's comments as {@link RenderComments}
+     * for the render, or undefined when comment pulling is off ({@link
+     * Config.comments}) or the fetch fails. A failure is non-fatal — a page whose
+     * comments are unreadable still pulls its body — but it is logged as a warning
+     * rather than swallowed, so a misconfigured or rejected comment API is visible
+     * in the pull output instead of silently rendering no comments. A successful
+     * fetch that finds none is logged too, so "the API returned nothing" is
+     * distinguishable from "the fetch failed".
+     */
+    private async fetchRenderComments(
+        pageId: string,
+    ): Promise<RenderComments | undefined> {
+        if (!this.d.config.comments) {
+            return undefined;
+        }
+        try {
+            const fetched = await this.d.client.fetchComments(pageId);
+            const total =
+                countComments(fetched.inline) + countComments(fetched.footer);
+            if (total === 0) {
+                this.d.reporter.log(
+                    `cfsync: page ${pageId}: no comments returned\n`,
+                );
+            }
+            return toRenderComments(fetched);
+        } catch (err) {
+            this.d.reporter.log(
+                `cfsync: page ${pageId}: fetching comments failed: ` +
+                    `${message(err)}\n`,
+            );
+            return undefined;
+        }
     }
 
     /**
@@ -567,6 +622,21 @@ export class Puller {
         }
 
         if (localFm.body === remoteFm.body) {
+            const wrote = await writeIfChanged(this.d.fs, dest, remote);
+            return wrote ? "wrote" : "kept";
+        }
+
+        // Comments are an unversioned overlay cfsync adds on pull, not user edits.
+        // When the note and the fresh render differ ONLY by that overlay, take the
+        // render so the note picks up the current comments. This also self-heals a
+        // note the pre-fix cache-ordering bug left comment-free (its cached base
+        // was clobbered, so the version compare below would wrongly keep it). A
+        // real body edit survives: stripping the overlay leaves the bodies
+        // different, so this does not fire and the merge below runs.
+        if (
+            stripCommentDecorations(localFm.body) ===
+            stripCommentDecorations(remoteFm.body)
+        ) {
             const wrote = await writeIfChanged(this.d.fs, dest, remote);
             return wrote ? "wrote" : "kept";
         }
@@ -1356,6 +1426,66 @@ async function isDivergent(
         version,
     );
     return base === null || body !== base;
+}
+
+/**
+ * toRenderComments projects the client's fetched {@link PageComments} onto the
+ * render's {@link RenderComments}: inline comments carrying a marker are keyed by
+ * it for anchor placement, and footer comments — plus any inline comment with no
+ * marker — become trailing threads. Each comment's ADF body is parsed to its
+ * block nodes for the callout.
+ */
+function toRenderComments(comments: PageComments): RenderComments {
+    const byMarker = new Map<string, CommentThread>();
+    const trailing: CommentThread[] = [];
+    for (const c of comments.inline) {
+        const thread = toThread(c);
+        if (thread.markerRef !== "") {
+            byMarker.set(thread.markerRef, thread);
+        } else {
+            trailing.push(thread);
+        }
+    }
+    for (const c of comments.footer) {
+        trailing.push(toThread(c));
+    }
+    return { byMarker, trailing };
+}
+
+/** countComments totals a comment list including every nested reply. */
+function countComments(comments: PageComment[]): number {
+    let n = 0;
+    for (const c of comments) {
+        n += 1 + countComments(c.replies);
+    }
+    return n;
+}
+
+/** toThread maps one {@link PageComment} (and its replies) to a {@link CommentThread}. */
+function toThread(comment: PageComment): CommentThread {
+    return {
+        id: comment.id,
+        markerRef: comment.markerRef,
+        resolution: comment.resolution,
+        authorId: comment.authorId,
+        createdAt: comment.createdAt,
+        body: commentBody(comment.adf),
+        replies: comment.replies.map(toThread),
+    };
+}
+
+/**
+ * commentBody parses a comment's ADF body (a `doc` JSON string) to its top-level
+ * block nodes, the content the callout renders. An unparseable or malformed body
+ * yields no blocks, so the callout still shows its metadata line.
+ */
+function commentBody(adf: string): Node[] {
+    try {
+        const doc = JSON.parse(adf) as { content?: Node[] };
+        return Array.isArray(doc.content) ? doc.content : [];
+    } catch {
+        return [];
+    }
 }
 
 /** message returns an unknown thrown value's message. */

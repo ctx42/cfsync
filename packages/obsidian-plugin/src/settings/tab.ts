@@ -193,6 +193,20 @@ export class cfsyncSettingTab extends PluginSettingTab {
             });
 
         new Setting(containerEl)
+            .setName("Comments")
+            .setDesc(
+                "Pull Confluence comments as [!comment] callouts, and push " +
+                    "replies and resolutions back.",
+            )
+            .addToggle((t) =>
+                t.setValue(s.comments).onChange((v) =>
+                    commitScalar(() => {
+                        s.comments = v;
+                    }),
+                ),
+            );
+
+        new Setting(containerEl)
             .setName("Sync-root subfolder")
             .setDesc(
                 "Vault-relative folder to sync under; empty = whole vault.",

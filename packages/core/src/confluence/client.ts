@@ -34,6 +34,20 @@ const RESTRICTION_PREFIX = "/wiki/rest/api/content/";
 const RESTRICTION_SUFFIX = "/restriction";
 /** The direct-children suffix appended to a page or folder path. */
 export const CHILDREN_PATH = "/direct-children";
+/** The v2 page inline-comments suffix (appended to a page path). */
+const INLINE_COMMENTS_PATH = "/inline-comments";
+/** The v2 page footer-comments suffix (appended to a page path). */
+const FOOTER_COMMENTS_PATH = "/footer-comments";
+/** The v2 inline-comments collection endpoint (create; `/{id}` for one comment). */
+const INLINE_COMMENTS_ENDPOINT = "/wiki/api/v2/inline-comments";
+/** The v2 footer-comments collection endpoint (create; `/{id}` for one comment). */
+const FOOTER_COMMENTS_ENDPOINT = "/wiki/api/v2/footer-comments";
+/** The v2 inline-comment-by-id endpoint prefix, for a comment's replies. */
+const INLINE_COMMENT_ENDPOINT = `${INLINE_COMMENTS_ENDPOINT}/`;
+/** The v2 footer-comment-by-id endpoint prefix, for a comment's replies. */
+const FOOTER_COMMENT_ENDPOINT = `${FOOTER_COMMENTS_ENDPOINT}/`;
+/** The children suffix appended to a comment path to list its replies. */
+const COMMENT_CHILDREN_PATH = "/children";
 
 /**
  * FolderTitleTakenError reports that a folder create was rejected because a
@@ -98,6 +112,56 @@ export interface Attachment {
     mediaType: string;
     /** Site-relative download path; it lacks the `/wiki` prefix and redirects. */
     downloadLink: string;
+}
+
+/**
+ * PageComment is one Confluence comment as the sync layer reads it — an inline
+ * comment (anchored to a run of body text) or a footer comment (page-level),
+ * with its reply thread nested under {@link PageComment.replies} in order. The
+ * body arrives as a raw ADF JSON string so the same ADF→Markdown renderer that
+ * produces the page body can render the comment into its `[!comment]` callout.
+ */
+export interface PageComment {
+    /** The comment's own numeric id (the handle for a reply or a resolve). */
+    id: string;
+    /** Whether the comment is anchored to body text (`inline`) or page-level (`footer`). */
+    kind: "inline" | "footer";
+    /**
+     * The inline comment's resolution: `open`, `resolved`, `reopened`, or
+     * `dangling` (its anchor text no longer exists in the body). Empty for a
+     * footer comment, which has no resolution.
+     */
+    resolution: string;
+    /**
+     * The id of the body `annotation` mark this inline comment anchors to
+     * (`properties.inlineMarkerRef`, equal to the mark's `attrs.id`), which is how
+     * a rendered footnote ref is tied back to its thread. Empty for a footer comment.
+     */
+    markerRef: string;
+    /**
+     * The exact body text the inline comment highlights
+     * (`properties.inlineOriginalSelection`), a human-readable fallback anchor when
+     * the marker id is not present in the body. Empty for a footer comment.
+     */
+    anchorText: string;
+    /** The account id of the comment's author (`version.authorId`). */
+    authorId: string;
+    /** The ISO-8601 creation timestamp of the comment (`version.createdAt`). */
+    createdAt: string;
+    /** The comment's current version number (`version.number`), bumped when resolving. */
+    version: number;
+    /** The comment body as a raw ADF JSON string (validated as parseable JSON). */
+    adf: string;
+    /** The comment's replies, in thread order; each may itself carry replies. */
+    replies: PageComment[];
+}
+
+/** PageComments is a page's inline and footer comment threads, fetched together. */
+export interface PageComments {
+    /** Inline comments, each anchored to the body via its {@link PageComment.markerRef}. */
+    inline: PageComment[];
+    /** Footer (page-level) comments, in thread order. */
+    footer: PageComment[];
 }
 
 /**
@@ -338,6 +402,136 @@ export class ConfluenceClient {
             addr = nextURL(this.cfg.host, asStr(asObj(o["_links"])["next"]));
         }
         return out;
+    }
+
+    /**
+     * fetchComments lists a page's inline and footer comments — each with its
+     * reply thread — as {@link PageComments}. It queries the two v2 per-page
+     * comment endpoints for the top-level comments (following the pagination
+     * cursor to completion, asking for each body in ADF), then fetches every
+     * comment's replies recursively via {@link fetchReplies}. Inline comments
+     * carry the `markerRef` that ties them to a body `annotation` mark; footer
+     * comments are page-level. A page with no comments yields two empty arrays.
+     */
+    async fetchComments(pageId: string): Promise<PageComments> {
+        const inlineBase =
+            `${this.cfg.host}${PAGE_ENDPOINT}${pageId}` +
+            `${INLINE_COMMENTS_PATH}?body-format=atlas_doc_format`;
+        const footerBase =
+            `${this.cfg.host}${PAGE_ENDPOINT}${pageId}` +
+            `${FOOTER_COMMENTS_PATH}?body-format=atlas_doc_format`;
+        const [inline, footer] = await Promise.all([
+            this.listComments(inlineBase, "inline"),
+            this.listComments(footerBase, "footer"),
+        ]);
+        return { inline, footer };
+    }
+
+    /**
+     * listComments pages through a comment listing at `url`, parsing each result
+     * into a {@link PageComment} of the given `kind` and attaching its recursively
+     * fetched replies. Shared by the inline and footer top-level fetches; the
+     * reply fetch dispatches on `kind` for the correct children endpoint.
+     */
+    private async listComments(
+        url: string,
+        kind: "inline" | "footer",
+    ): Promise<PageComment[]> {
+        const out: PageComment[] = [];
+        let addr = url;
+        while (addr !== "") {
+            const resp = await this.get(addr);
+            if (!ok(resp.status)) {
+                throw new Error(`${kind} comments: HTTP ${resp.status}`);
+            }
+            let cr: unknown;
+            try {
+                cr = JSON.parse(responseText(resp));
+            } catch (err) {
+                throw new Error(`decoding ${kind} comments: ${message(err)}`);
+            }
+            const o = asObj(cr);
+            for (const r of asArr(o["results"])) {
+                const comment = parseComment(asObj(r), kind);
+                comment.replies = await this.fetchReplies(comment.id, kind);
+                out.push(comment);
+            }
+            addr = nextURL(this.cfg.host, asStr(asObj(o["_links"])["next"]));
+        }
+        return out;
+    }
+
+    /**
+     * fetchReplies returns the reply thread of the comment `id` of the given
+     * `kind`, each reply carrying its own replies (a thread nests). It pages the
+     * comment's children endpoint to completion, asking for each body in ADF. A
+     * reply inherits its parent's kind; its `markerRef`/`anchorText` are empty (a
+     * reply anchors to its parent, not to the body).
+     */
+    private async fetchReplies(
+        id: string,
+        kind: "inline" | "footer",
+    ): Promise<PageComment[]> {
+        const prefix =
+            kind === "inline"
+                ? INLINE_COMMENT_ENDPOINT
+                : FOOTER_COMMENT_ENDPOINT;
+        const url =
+            `${this.cfg.host}${prefix}${id}${COMMENT_CHILDREN_PATH}` +
+            "?body-format=atlas_doc_format";
+        return this.listComments(url, kind);
+    }
+
+    /**
+     * createReply posts a reply to an existing comment: a new comment of the same
+     * `kind` carrying the parent's id as `parentCommentId`, with `adf` (a raw ADF
+     * JSON string) as its body. It returns the new comment's id. The payload
+     * carries `parentCommentId` alone — the v2 create endpoint rejects a request
+     * that also specifies `pageId` ("one and only one of blogPostId, pageId, or
+     * parentCommentId"). An inline reply inherits its parent's text anchor, so it
+     * needs no marker properties. Throws on a non-2xx status or a response with no
+     * id.
+     */
+    async createReply(input: {
+        parentId: string;
+        kind: "inline" | "footer";
+        adf: string;
+    }): Promise<string> {
+        const path =
+            input.kind === "inline"
+                ? INLINE_COMMENTS_ENDPOINT
+                : FOOTER_COMMENTS_ENDPOINT;
+        const payload = {
+            parentCommentId: input.parentId,
+            body: { representation: "atlas_doc_format", value: input.adf },
+        };
+        const resp = await this.http.do({
+            method: "POST",
+            url: `${this.cfg.host}${path}`,
+            headers: {
+                Authorization: this.auth,
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify(payload),
+        });
+        if (!ok(resp.status)) {
+            throw new Error(
+                `reply to comment ${input.parentId}: HTTP ${resp.status}`,
+            );
+        }
+        let cr: unknown;
+        try {
+            cr = JSON.parse(responseText(resp));
+        } catch (err) {
+            throw new Error(`decoding reply response: ${message(err)}`);
+        }
+        const id = asStr(asObj(cr)["id"]);
+        if (id === "") {
+            throw new Error(
+                `reply to comment ${input.parentId}: response has no id`,
+            );
+        }
+        return id;
     }
 
     /**
@@ -737,6 +931,42 @@ function concatBytes(...parts: Uint8Array[]): Uint8Array {
         offset += part.length;
     }
     return out;
+}
+
+/**
+ * parseComment reads one v2 comment result into a {@link PageComment} of `kind`,
+ * with an empty `replies` the caller fills. The body is the ADF value under
+ * `body.atlas_doc_format`, kept as its raw JSON string; author and timestamp
+ * come from `version`. For an inline comment the anchor fields are read from the
+ * `properties` object — `inlineMarkerRef` (the body annotation-mark id) and
+ * `inlineOriginalSelection` (the highlighted text) — and are empty for a footer
+ * comment, which has no such properties. Confluence returns each under both a
+ * camelCase and a kebab-case key (`inline-marker-ref`); the camelCase is read
+ * first, the kebab-case a fallback. `resolutionStatus` is likewise inline-only.
+ */
+function parseComment(
+    o: Record<string, unknown>,
+    kind: "inline" | "footer",
+): PageComment {
+    const version = asObj(o["version"]);
+    const props = asObj(o["properties"]);
+    const prop = (camel: string, kebab: string): string =>
+        asStr(props[camel]) || asStr(props[kebab]);
+    return {
+        id: asStr(o["id"]),
+        kind,
+        resolution: asStr(o["resolutionStatus"]),
+        markerRef: prop("inlineMarkerRef", "inline-marker-ref"),
+        anchorText: prop(
+            "inlineOriginalSelection",
+            "inline-original-selection",
+        ),
+        authorId: asStr(version["authorId"]),
+        createdAt: asStr(version["createdAt"]),
+        version: asInt(version["number"]),
+        adf: asStr(asObj(asObj(o["body"])["atlas_doc_format"])["value"]),
+        replies: [],
+    };
 }
 
 /** asObj narrows a parsed JSON value to a record, or `{}`. */

@@ -102,6 +102,12 @@ export interface Config {
     margin: number;
     /** The resolved Markdown flavor id driving ADF↔Markdown conversion. */
     flavor: string;
+    /**
+     * Whether a pull fetches each page's Confluence comments and renders them as
+     * `[!comment]` callouts with `[^cf-…]` anchors (the `comments` setting).
+     * Off by default; the decorations are read-only (stripped before a push).
+     */
+    comments: boolean;
     /** Resolved path → source, for pages, folders, and spaces respectively. */
     pages: Record<string, string>;
     folders: Record<string, string>;
@@ -159,6 +165,7 @@ export function buildConfig(
         timeoutMs: reqTimeout(readNumber(raw, "timeoutMs")),
         margin: readMargin(raw),
         flavor: readFlavor(raw),
+        comments: readComments(raw),
         pages,
         folders,
         spaces,
@@ -482,6 +489,22 @@ function readFlavor(raw: Record<string, unknown>): string {
         throw new Error('config: "markdown.flavor" must be a string');
     }
     resolveFlavor(value); // throws on unknown id
+    return value;
+}
+
+/**
+ * readComments reads the `comments` setting: whether a pull fetches and renders
+ * each page's Confluence comments. It defaults to `false` (comments are not
+ * pulled) and throws when the value is present but not a boolean.
+ */
+function readComments(raw: Record<string, unknown>): boolean {
+    const value = raw["comments"];
+    if (value === undefined || value === null) {
+        return false;
+    }
+    if (typeof value !== "boolean") {
+        throw new Error('config: "comments" must be a boolean');
+    }
     return value;
 }
 

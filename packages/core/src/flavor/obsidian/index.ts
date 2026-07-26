@@ -11,7 +11,8 @@ import type { Flavor } from "../flavor.ts";
 
 export const obsidianFlavor: Flavor = {
     id: "obsidian",
-    render: (adf, o) => marshallMapped(adf, o.assets, o.links, o.margin ?? 0),
+    render: (adf, o) =>
+        marshallMapped(adf, o.assets, o.links, o.margin ?? 0, o.comments),
     reconstruct: (adf, body, o) =>
         putLinks(
             adf,

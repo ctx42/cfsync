@@ -15,12 +15,17 @@
 import { type ADF, attrStr } from "../../models/adf.ts";
 import type { Links } from "../links.ts";
 import { type MdBlock, newBlock } from "../parse/blocks.ts";
+import { blockComments, trailingComments } from "../render/comments.ts";
 import {
     ambiguousMentions,
     frontmatter,
     goQuote,
 } from "../render/frontmatter.ts";
-import { type MdCtx, renderBlockList } from "../render/markdown.ts";
+import {
+    type MdCtx,
+    type RenderComments,
+    renderBlockList,
+} from "../render/markdown.ts";
 
 /**
  * Span is the half-open range `[start, end)` a rendered block occupies in the
@@ -82,16 +87,26 @@ export function marshallMapped(
     assets: Record<string, string>,
     links: Links | null,
     margin = 0,
+    comments?: RenderComments,
 ): [string, SourceMap] {
     if (adf.doc.type !== "doc") {
         throw new Error(`root node is ${goQuote(adf.doc.type)}, want doc`);
     }
-    const ctx: MdCtx = { assets, ambig: ambiguousMentions(adf), links, margin };
+    const ctx: MdCtx = {
+        assets,
+        ambig: ambiguousMentions(adf),
+        links,
+        margin,
+        ...(comments ? { comments } : {}),
+    };
     const blocks = renderBlockList(adf.doc.content ?? [], ctx);
 
     let b = frontmatter(adf, assets);
     const sm: SourceMap = { bodyStart: 0, origins: [] };
     const content = adf.doc.content ?? [];
+    // Tracks which inline-comment markers a block already drew, so an anchored
+    // thread is neither placed twice nor repeated in the trailing section.
+    const used = new Set<string>();
     if (blocks.length > 0) {
         b += "\n\n";
         sm.bodyStart = b.length;
@@ -102,15 +117,32 @@ export function marshallMapped(
             const start = b.length;
             b += blk.text;
             const node = content[blk.nodeIndex] ?? { type: "" };
+            // The origin spans the block text only; a comment callout appended
+            // after it has no source node and must fall outside the span.
             sm.origins.push({
                 nodeIndex: blk.nodeIndex,
                 type: node.type,
                 localId: attrStr(node.attrs, "localId"),
                 span: { start, end: b.length },
             });
+            const callouts = blockComments(node, ctx, used);
+            if (callouts !== "") {
+                b += `\n\n${callouts}`;
+            }
+        }
+        const trailing = comments ? trailingComments(comments, ctx, used) : "";
+        if (trailing !== "") {
+            b += `\n\n${trailing}`;
         }
     } else {
-        sm.bodyStart = b.length;
+        const trailing = comments ? trailingComments(comments, ctx, used) : "";
+        if (trailing !== "") {
+            b += "\n\n";
+            sm.bodyStart = b.length;
+            b += trailing;
+        } else {
+            sm.bodyStart = b.length;
+        }
     }
     b += "\n";
     return [b, sm];

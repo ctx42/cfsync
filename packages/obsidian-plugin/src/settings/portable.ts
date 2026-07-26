@@ -23,6 +23,8 @@ export interface PortableConfig {
     /** Per-request HTTP timeout, formatted as a Go-style duration, e.g. `"30s"`. */
     timeout: string;
     markdown: { flavor: string; margin: number };
+    /** Whether to pull/push Confluence comments; matches the core's top-level key. */
+    comments: boolean;
     pages: Record<string, string>;
     folders: Record<string, string>;
     spaces: Record<string, string>;
@@ -36,6 +38,7 @@ export function toPortableConfig(settings: cfsyncSettings): PortableConfig {
     return {
         timeout: `${settings.timeoutSeconds}s`,
         markdown: { flavor: settings.flavor, margin: settings.margin },
+        comments: settings.comments,
         pages: { ...settings.pages },
         folders: { ...settings.folders },
         spaces: { ...settings.spaces },

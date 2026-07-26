@@ -113,6 +113,7 @@ export async function loadConfig(
             timeoutMs: durationMs(obj["timeout"]),
             margin: markdown["margin"],
             flavor: markdown["flavor"],
+            comments: obj["comments"],
             pages: obj["pages"],
             folders: obj["folders"],
             spaces: obj["spaces"],

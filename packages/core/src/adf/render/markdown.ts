@@ -46,6 +46,47 @@ function marginOf(ctx: MdCtx): number {
     return ctx.margin ?? 0;
 }
 
+/** The footnote-label prefix that namespaces a cfsync comment anchor (`[^cf-<id>]`). */
+export const COMMENT_REF_PREFIX = "cf-";
+
+/**
+ * CommentThread is one Confluence comment as the renderer draws it into a
+ * `[!comment]` callout: the metadata line fields plus its body (the comment's
+ * own ADF content) and its reply thread. It is the render-facing projection of
+ * the client's `PageComment`, decoupled from the fetch DTO so the render layer
+ * does not depend on the Confluence client.
+ */
+export interface CommentThread {
+    /** The comment's own id, shown as `id:<id>` and (Stage 2) the reply/resolve handle. */
+    id: string;
+    /** The body annotation-mark id this inline comment anchors to; `""` for a footer comment. */
+    markerRef: string;
+    /** The inline comment's resolution (`open`/`resolved`/…); `""` for a footer comment or a reply. */
+    resolution: string;
+    /** The comment author's account id, shown as `@<authorId>`. */
+    authorId: string;
+    /** The ISO-8601 creation timestamp, shown on the metadata line. */
+    createdAt: string;
+    /** The comment body as ADF block nodes, rendered through the normal block dispatch. */
+    body: Node[];
+    /** The comment's replies, in thread order, drawn as nested callouts. */
+    replies: CommentThread[];
+}
+
+/**
+ * RenderComments is the page's comment set as the renderer consumes it: inline
+ * threads keyed by their `markerRef` (so a block carrying the matching body
+ * annotation gets its callout appended, and the annotated run gets its `[^cf-…]`
+ * ref), and the `trailing` threads — footer comments plus any inline thread whose
+ * marker was not found in the body — collected into a section at the end.
+ */
+export interface RenderComments {
+    /** Inline threads by `markerRef`, placed after the block that carries the marker. */
+    byMarker: Map<string, CommentThread>;
+    /** Footer comments and orphaned inline threads, rendered in the trailing section. */
+    trailing: CommentThread[];
+}
+
 /**
  * MdCtx carries the page-level state threaded through the render so leaf nodes
  * render correctly: the resolved image `assets` (media localId → image path),
@@ -67,6 +108,12 @@ export interface MdCtx {
      * editor. See {@link marginOf}.
      */
     margin?: number;
+    /**
+     * The page's comments to weave in as `[^cf-…]` anchors and `[!comment]`
+     * callouts. Absent (the default) renders no comments — the byte-identical path
+     * the push baseline and reconstruct depend on.
+     */
+    comments?: RenderComments;
 }
 
 /**
@@ -345,6 +392,51 @@ function hasCodeMark(nod: Node): boolean {
 /** hasLink reports whether the node carries a link mark. */
 function hasLink(nod: Node): boolean {
     return linkHref(nod) !== undefined;
+}
+
+/**
+ * annotationIdsOf returns the ids of the inlineComment `annotation` marks on a
+ * text node, in mark order. A run of text can carry several (overlapping
+ * comments), so the caller dedups across the run.
+ */
+export function annotationIdsOf(nod: Node): string[] {
+    const out: string[] = [];
+    for (const mrk of nod.marks ?? []) {
+        if (mrk.type === "annotation") {
+            const id = attrStr(mrk.attrs, "id");
+            if (id !== "") {
+                out.push(id);
+            }
+        }
+    }
+    return out;
+}
+
+/**
+ * commentRefs returns the `[^cf-<id>]` footnote refs to append after a rendered
+ * text run: one per distinct annotation id in the run that has a matching inline
+ * comment thread ({@link RenderComments.byMarker}), in first-appearance order.
+ * The refs are appended *after* the whole run rather than spliced into it, so the
+ * run's text and formatting are untouched and a later strip restores it exactly.
+ * With no comments in the context (the push/baseline path) it returns `""`, so
+ * the render is byte-identical to a comment-free one.
+ */
+function commentRefs(run: Node[], ctx: MdCtx): string {
+    const byMarker = ctx.comments?.byMarker;
+    if (byMarker === undefined || byMarker.size === 0) {
+        return "";
+    }
+    const seen = new Set<string>();
+    let out = "";
+    for (const nod of run) {
+        for (const id of annotationIdsOf(nod)) {
+            if (byMarker.has(id) && !seen.has(id)) {
+                seen.add(id);
+                out += `[^${COMMENT_REF_PREFIX}${id}]`;
+            }
+        }
+    }
+    return out;
 }
 
 /**
@@ -735,7 +827,7 @@ export function inlineSegments(nod: Node, ctx: MdCtx): string[] {
     let run: Node[] = [];
     const flush = (): void => {
         if (run.length > 0) {
-            b += renderTextRun(run);
+            b += renderTextRun(run) + commentRefs(run, ctx);
             run = [];
         }
     };

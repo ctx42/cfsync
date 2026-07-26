@@ -245,6 +245,209 @@ describe("Puller.pullPages", () => {
         expect(await fs.exists("/data/cache/notes/page.v3.md")).toBe(true);
     });
 
+    it("decorates the note with comments when config.comments is on", async () => {
+        const config = buildConfig(
+            {
+                pages: { "notes/page.md": "/wiki/spaces/X/pages/123/Title" },
+                comments: true,
+            },
+            {
+                site: "ex",
+                account: "a@ex.com",
+                token: "secret",
+                syncRoot: "/vault",
+            },
+        );
+        // A body whose "world" run carries the inlineComment annotation "M1".
+        const adf = {
+            version: 1,
+            type: "doc",
+            content: [
+                {
+                    type: "paragraph",
+                    content: [
+                        { type: "text", text: "hello " },
+                        {
+                            type: "text",
+                            text: "world",
+                            marks: [
+                                {
+                                    type: "annotation",
+                                    attrs: {
+                                        id: "M1",
+                                        annotationType: "inlineComment",
+                                    },
+                                },
+                            ],
+                        },
+                    ],
+                },
+            ],
+        };
+        const commentBody = {
+            type: "doc",
+            content: [
+                {
+                    type: "paragraph",
+                    content: [{ type: "text", text: "Where from?" }],
+                },
+            ],
+        };
+        const v2 = "https://ex.atlassian.net/wiki/api/v2";
+        const adfQ = "?body-format=atlas_doc_format";
+        const stub = new StubHttpClient()
+            .on("GET", pageURL("123"), { body: pageBody("123", 3, adf) })
+            .on("GET", `${v2}/pages/123/inline-comments${adfQ}`, {
+                body: JSON.stringify({
+                    results: [
+                        {
+                            id: "C1",
+                            resolutionStatus: "open",
+                            properties: { inlineMarkerRef: "M1" },
+                            version: {
+                                authorId: "jsmith",
+                                createdAt: "2026-07-20T10:00:00Z",
+                            },
+                            body: {
+                                atlas_doc_format: {
+                                    value: JSON.stringify(commentBody),
+                                },
+                            },
+                        },
+                    ],
+                    _links: {},
+                }),
+            })
+            .on("GET", `${v2}/inline-comments/C1/children${adfQ}`, {
+                body: JSON.stringify({ results: [], _links: {} }),
+            })
+            .on("GET", `${v2}/pages/123/footer-comments${adfQ}`, {
+                body: JSON.stringify({ results: [], _links: {} }),
+            });
+        const { puller, fs } = pullerFor(config, stub);
+
+        const out = await puller.pullPages();
+
+        expect(out.errors).toEqual([]);
+        const note = await fs.readText("/vault/notes/page.md");
+        expect(note).toContain("hello world[^cf-M1]");
+        expect(note).toContain(
+            "> [!comment] id:C1 · @jsmith · 2026-07-20T10:00:00Z · open",
+        );
+        expect(note).toContain("> Where from?");
+        // The cache render carries the same decorations, so the note is not seen
+        // as a local edit on the next pull.
+        expect(await fs.readText("/data/cache/notes/page.v3.md")).toContain(
+            "[^cf-M1]",
+        );
+    });
+
+    it("self-heals a comment-free note whose cached base was clobbered", async () => {
+        // The pre-fix cache-ordering bug left notes comment-free while their
+        // cached .vN.md base held the decorated render. A pull must still decorate
+        // such a note: it differs from the fresh render only by the comment
+        // overlay, so the render is taken.
+        const config = buildConfig(
+            {
+                pages: { "notes/page.md": "/wiki/spaces/X/pages/123/Title" },
+                comments: true,
+            },
+            {
+                site: "ex",
+                account: "a@ex.com",
+                token: "secret",
+                syncRoot: "/vault",
+            },
+        );
+        const adf = {
+            version: 1,
+            type: "doc",
+            content: [
+                {
+                    type: "paragraph",
+                    content: [
+                        { type: "text", text: "hello " },
+                        {
+                            type: "text",
+                            text: "world",
+                            marks: [
+                                {
+                                    type: "annotation",
+                                    attrs: {
+                                        id: "M1",
+                                        annotationType: "inlineComment",
+                                    },
+                                },
+                            ],
+                        },
+                    ],
+                },
+            ],
+        };
+        const commentBody = {
+            type: "doc",
+            content: [
+                {
+                    type: "paragraph",
+                    content: [{ type: "text", text: "Where from?" }],
+                },
+            ],
+        };
+        const v2 = "https://ex.atlassian.net/wiki/api/v2";
+        const adfQ = "?body-format=atlas_doc_format";
+        const stub = new StubHttpClient()
+            .on("GET", pageURL("123"), { body: pageBody("123", 3, adf) })
+            .on("GET", `${v2}/pages/123/inline-comments${adfQ}`, {
+                body: JSON.stringify({
+                    results: [
+                        {
+                            id: "C1",
+                            resolutionStatus: "open",
+                            properties: { inlineMarkerRef: "M1" },
+                            version: {
+                                authorId: "jsmith",
+                                createdAt: "2026-07-20T10:00:00Z",
+                            },
+                            body: {
+                                atlas_doc_format: {
+                                    value: JSON.stringify(commentBody),
+                                },
+                            },
+                        },
+                    ],
+                    _links: {},
+                }),
+            })
+            .on("GET", `${v2}/inline-comments/C1/children${adfQ}`, {
+                body: JSON.stringify({ results: [], _links: {} }),
+            })
+            .on("GET", `${v2}/pages/123/footer-comments${adfQ}`, {
+                body: JSON.stringify({ results: [], _links: {} }),
+            });
+
+        // The corrupted state: a comment-free note, but a DECORATED cached base.
+        const fs = new MemFS();
+        await fs.write(
+            "/vault/notes/page.md",
+            '---\ncfsync-plugin: pull\ntitle: "Title"\npage_id: "123"\n' +
+                'page_version: 3\nspace_id: "9"\n---\n\nhello world\n',
+        );
+        await fs.write(
+            "/data/cache/notes/page.v3.md",
+            "---\npage_version: 3\n---\n\nhello world[^cf-M1]\n\n" +
+                "> [!comment] id:C1 · @jsmith · open\n> Where from?\n",
+        );
+        const { puller } = pullerFor(config, stub, fs);
+
+        const out = await puller.pullPages();
+
+        expect(out.errors).toEqual([]);
+        const note = await fs.readText("/vault/notes/page.md");
+        expect(note).toContain("hello world[^cf-M1]");
+        expect(note).toContain("> Where from?");
+        expect(note).not.toContain("<<<<<<<");
+    });
+
     it("counts unchanged on a second pull but keeps it out of the log", async () => {
         const config = testConfig({ "p.md": "/wiki/spaces/X/pages/123/Title" });
         const stub = new StubHttpClient().on("GET", pageURL("123"), {

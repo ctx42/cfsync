@@ -27,6 +27,12 @@ export interface cfsyncSettings {
     margin: number;
     /** Markdown flavor id driving ADF↔Markdown conversion. */
     flavor: string;
+    /**
+     * Whether a pull fetches each page's Confluence comments and renders them as
+     * `[!comment]` callouts with `[^cf-…]` anchors (and a push writes replies and
+     * resolutions back). Off by default.
+     */
+    comments: boolean;
     /** Destination `*.md` file → Confluence page source. */
     pages: Record<string, string>;
     /** Destination directory → Confluence folder source. */
@@ -43,6 +49,7 @@ export const DEFAULT_SETTINGS: cfsyncSettings = {
     timeoutSeconds: 30,
     margin: 0,
     flavor: "obsidian",
+    comments: false,
     pages: {},
     folders: {},
     spaces: {},
@@ -64,6 +71,7 @@ export function buildPluginConfig(
             timeoutMs: settings.timeoutSeconds * 1000,
             margin: settings.margin,
             flavor: settings.flavor,
+            comments: settings.comments,
             pages: settings.pages,
             folders: settings.folders,
             spaces: settings.spaces,

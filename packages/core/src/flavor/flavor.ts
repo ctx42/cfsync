@@ -9,6 +9,7 @@
 import type { NewImage } from "../adf/lens/reconstruct.ts";
 import type { SourceMap } from "../adf/lens/sourcemap.ts";
 import type { Links } from "../adf/links.ts";
+import type { RenderComments } from "../adf/render/markdown.ts";
 import type { ADF } from "../models/adf.ts";
 import { obsidianFlavor } from "./obsidian/index.ts";
 
@@ -20,6 +21,12 @@ export interface RenderOpts {
     links: Links | null;
     /** Soft-wrap column; 0 or unset disables wrapping (the Obsidian default). */
     margin?: number;
+    /**
+     * The page's comments to weave in as anchors and `[!comment]` callouts, or
+     * undefined (the default) to render none — the byte-identical path the push
+     * baseline depends on.
+     */
+    comments?: RenderComments;
 }
 
 /** ReconstructOpts are the inputs a flavor needs to back-port Markdown → ADF. */

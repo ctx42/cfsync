@@ -784,3 +784,110 @@ describe("MetaCache", () => {
         expect(fs.reads.get("/vault/a.md")).toBe(1);
     });
 });
+
+describe("Pusher.pushOne comment write-back", () => {
+    const v2 = "https://ex.atlassian.net/wiki/api/v2";
+    const adfQ = "?body-format=atlas_doc_format";
+
+    /** commentsConfig is the base config with comment sync enabled. */
+    const commentsConfig = (): Config =>
+        buildConfig(
+            { comments: true },
+            {
+                site: "ex",
+                account: "a@ex.com",
+                token: "secret",
+                syncRoot: "/vault",
+            },
+        );
+
+    /** commentsPusher builds a Pusher whose config has comments: true. */
+    function commentsPusher(stub: StubHttpClient, fs: MemFS): Pusher {
+        const cfg = commentsConfig();
+        return new Pusher({
+            client: new ConfluenceClient(stub, {
+                host: cfg.host,
+                account: cfg.account,
+                token: cfg.token,
+            }),
+            fs,
+            yaml,
+            config: cfg,
+            reporter: new NoopReporter(),
+            cacheDir: "/data/cache",
+            assetsDir: "/vault/_cfsync-media",
+            mintLocalId: counterMint(),
+            links: null,
+            flavor: obsidianFlavor,
+            force: false,
+        });
+    }
+
+    /** thread stubs page 123's single inline comment C1 with no replies. */
+    function thread(): StubHttpClient {
+        return new StubHttpClient()
+            .on("GET", `${v2}/pages/123/inline-comments${adfQ}`, {
+                body: JSON.stringify({
+                    results: [
+                        {
+                            id: "C1",
+                            resolutionStatus: "open",
+                            properties: { inlineMarkerRef: "M1" },
+                            version: { number: 1, authorId: "jsmith" },
+                            body: {
+                                atlas_doc_format: {
+                                    value: JSON.stringify({
+                                        type: "doc",
+                                        content: [
+                                            {
+                                                type: "paragraph",
+                                                content: [
+                                                    { type: "text", text: "Q" },
+                                                ],
+                                            },
+                                        ],
+                                    }),
+                                },
+                            },
+                        },
+                    ],
+                    _links: {},
+                }),
+            })
+            .on("GET", `${v2}/inline-comments/C1/children${adfQ}`, {
+                body: JSON.stringify({ results: [], _links: {} }),
+            })
+            .on("GET", `${v2}/pages/123/footer-comments${adfQ}`, {
+                body: JSON.stringify({ results: [], _links: {} }),
+            });
+    }
+
+    it("writes back a reply on an otherwise-unchanged note", async () => {
+        const baseDoc = docOf(para("p1", "hello"));
+        const fs = new MemFS();
+        // The body is unchanged ("hello"); the note only adds a callout with a
+        // new id-less reply, so the page PUTs nothing but the reply is sent.
+        const body = [
+            "hello",
+            "",
+            "> [!comment] id:C1 · @jsmith · open",
+            "> Q",
+            "> > [!comment]",
+            "> > A fresh reply.",
+        ].join("\n");
+        await fs.write("/vault/p.md", note(3, body));
+        await fs.write("/data/cache/p.v3.json", cacheWrapper(3, baseDoc));
+        const stub = thread().on("POST", `${v2}/inline-comments`, {
+            body: '{"id":"C7"}',
+        });
+
+        const out = await commentsPusher(stub, fs).pushOne("/vault/p.md");
+
+        expect(out.changed).toBe(false); // body unchanged: no page PUT
+        expect(out.comments?.actions).toEqual(["replied to comment C1"]);
+        const post = stub.requests.find((r) => r.method === "POST");
+        expect(JSON.parse(String(post?.body)).parentCommentId).toBe("C1");
+        // No page update was issued.
+        expect(stub.requests.some((r) => r.method === "PUT")).toBe(false);
+    });
+});
