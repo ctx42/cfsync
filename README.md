@@ -52,6 +52,8 @@ you work — or use both against the same vault.
   maps to a local directory tree; names derive from page titles.
 - **Rich formatting survives.** Panels, tables, mentions, status/date/emoji,
   colored and underlined text, and macros all round-trip.
+- **Comments (opt-in).** Inline and footer comments pull in as `[!comment]`
+  callouts with `[^cf-…]` anchors; typed replies push back. Off by default.
 - **Safe concurrent edits.** A three-way merge folds in non-overlapping remote
   changes; a genuine conflict is refused, not clobbered.
 - **Cross-page links** rewrite to local `.md` paths on pull and restore on push.
@@ -300,6 +302,7 @@ The config file (YAML) holds only what to sync:
 |-------------------|----------|-----------------------------------------------------------------|
 | `timeout`         | no       | Per-request HTTP timeout, e.g. `45s` (default `30s`).           |
 | `markdown.margin` | no       | Hard-wrap column for Markdown text; `0`/unset = no wrap.        |
+| `comments`        | no       | Pull comments as `[!comment]` callouts, push replies (off).     |
 | `pages`           | no²      | Map of destination `.md` under the sync root → Confluence path. |
 | `folders`         | no²      | Map of destination dir under the sync root → Confluence folder. |
 | `spaces`          | no²      | Map of destination dir under the sync root → Confluence space.  |
@@ -396,6 +399,29 @@ extensions below.
 - **Blocks Markdown can't express** (macros, an `EXPAND`-type panel, unusual
   tables) are frozen in fenced ` ```adf ` blocks with a YAML body: read-only,
   preserved verbatim, and refused rather than corrupted if you edit inside them.
+
+### Comments
+
+Opt in with `comments: true` in the config (or the plugin's **Comments** toggle);
+it is off by default. A pull then brings each page's Confluence comments in
+alongside the body:
+
+- An **inline comment** appends a `[^cf-<id>]` footnote anchor after the run of
+  text it annotates, and a `> [!comment]` callout after that block. The callout's
+  first line carries the thread's id, author, date, and resolution; replies nest
+  as deeper callouts.
+- **Footer comments** — and any inline comment whose anchor text no longer exists
+  in the body — collect in a trailing `## Comments` section.
+
+To **reply**, add a nested callout with no `id:` under a thread and push; it is
+created on Confluence (a reply whose text already exists is not sent twice).
+Otherwise comments are a read-only overlay: a push **strips** them before
+reconstructing the body, so it never alters the page, and changing a thread's
+resolution is reported as unsupported because the Confluence REST API cannot
+write it. Edit the reply text, not the `[!comment]` metadata lines or the
+`[^cf-…]` anchors — those are `cfsync`-managed. Comments are not versioned with
+the page, so every pull re-fetches them; a note left comment-free by an earlier
+pull picks them up on the next one.
 
 You freely edit prose, headings, list items, blockquotes, panels, expands, and
 table cells, and add paragraphs and images; the frozen ` ```adf ` blocks and
