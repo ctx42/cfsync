@@ -1,12 +1,15 @@
 // SPDX-FileCopyrightText: (c) 2026 Rafal Zajac
 // SPDX-License-Identifier: MIT
 
-// Live comment round-trips against the real Site (RZTST). Comments are not part
-// of the page body ADF, so these seed a page, attach a real inline/footer comment
+// Live comment round-trips against the real Site (RZTST). A Confluence inline
+// comment is an `annotation` mark on the body that Confluence owns and uses as
+// the comment's anchor; these seed a page, attach a real inline/footer comment
 // via the v2 API, then drive the CLI: a pull must render the `[^cf-…]` anchor and
-// `[!comment]` callout, and a push must write a typed reply and a resolution
-// back. This is the suite that would have caught the `properties.inlineMarkerRef`
-// mapping bug the stubbed unit tests could not. Run: bun run --filter @cfsync/cli test:live
+// `[!comment]` callout, and a push of a body edit must leave the comment intact —
+// comments are managed on the Confluence side, so a push never creates, resolves,
+// or removes one. This is the suite that would have caught the
+// `properties.inlineMarkerRef` mapping bug the stubbed unit tests could not.
+// Run: bun run --filter @cfsync/cli test:live
 
 import { readFile, writeFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
@@ -91,11 +94,11 @@ describe.skipIf(!liveConfigured())("live comments", () => {
         expect(md).toContain("A late inline note.");
     });
 
-    it("push: an untagged nested reply is created on Confluence", async () => {
+    it("push: a body edit keeps the inline comment anchored, and local comment edits are ignored", async () => {
         const seed = await seedPage(
             env,
             client,
-            "cmt-reply",
+            "cmt-preserve",
             PAGE_ADF,
             "comments: true",
         );
@@ -105,49 +108,31 @@ describe.skipIf(!liveConfigured())("live comments", () => {
         );
 
         let md = await readFile(seed.dest, "utf8");
-        // Append an id-less nested reply inside the callout (contiguous `>` lines).
+        // Edit prose that leaves the commented word "Devices" intact, and add a
+        // local reply callout. The push must apply the body edit but leave the
+        // comment — anchor, thread, and the would-be reply — entirely to
+        // Confluence: the comment must survive the update, not vanish.
+        md = md.replace("lives here.", "lives right here.");
         md = md.replace(
             "> Which devices?",
-            "> Which devices?\n> > [!comment]\n> > Answer: all of them.",
+            "> Which devices?\n> > [!comment]\n> > A local reply.",
         );
         await writeFile(seed.dest, md);
 
         const pushed = await seed.run(["push", "--config", seed.cfgPath]);
         expect(pushed.code, pushed.err).toBe(0);
 
+        // The page body change landed on the next version.
+        const page = await client.fetchPage(seed.id);
+        expect(docText(parseDoc(page.adf))).toContain("lives right here.");
+
+        // The inline comment still exists, still anchored (never dangling), and
+        // no reply was written back — comments are Confluence-managed.
         const remote = await client.fetchComments(seed.id);
-        const replyTexts = remote.inline
-            .flatMap((t) => t.replies)
-            .map((r) => docText(parseDoc(r.adf)));
-        expect(replyTexts.join(" ")).toContain("Answer: all of them.");
-    });
-
-    it("push: flipping the resolution token warns (API cannot resolve)", async () => {
-        const seed = await seedPage(
-            env,
-            client,
-            "cmt-resolve",
-            PAGE_ADF,
-            "comments: true",
-        );
-        await seedInlineComment(env, seed.id, "Devices", "Please resolve.");
-        expect((await seed.run(["pull", "--config", seed.cfgPath])).code).toBe(
-            0,
-        );
-
-        let md = await readFile(seed.dest, "utf8");
-        expect(md).toContain(" · open");
-        md = md.replace(" · open", " · resolved");
-        await writeFile(seed.dest, md);
-
-        // Confluence exposes no stable REST endpoint to resolve an inline comment,
-        // so the push succeeds, warns, and the thread stays open — cfsync never
-        // claims a resolution it cannot actually write.
-        const pushed = await seed.run(["push", "--config", seed.cfgPath]);
-        expect(pushed.code, pushed.err).toBe(0);
-        expect(`${pushed.out}${pushed.err}`).toContain("not supported");
-
-        const remote = await client.fetchComments(seed.id);
-        expect(remote.inline[0]?.resolution).toBe("open");
+        expect(remote.inline).toHaveLength(1);
+        const top = remote.inline[0];
+        expect(docText(parseDoc(top?.adf ?? ""))).toContain("Which devices?");
+        expect(top?.resolution).not.toBe("dangling");
+        expect(remote.inline.flatMap((t) => t.replies)).toHaveLength(0);
     });
 });

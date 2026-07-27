@@ -53,7 +53,8 @@ you work — or use both against the same vault.
 - **Rich formatting survives.** Panels, tables, mentions, status/date/emoji,
   colored and underlined text, and macros all round-trip.
 - **Comments (opt-in).** Inline and footer comments pull in as `[!comment]`
-  callouts with `[^cf-…]` anchors; typed replies push back. Off by default.
+  callouts with `[^cf-…]` anchors; a push preserves them but never changes them
+  (comments are managed on Confluence). Off by default.
 - **Safe concurrent edits.** A three-way merge folds in non-overlapping remote
   changes; a genuine conflict is refused, not clobbered.
 - **Cross-page links** rewrite to local `.md` paths on pull and restore on push.
@@ -302,7 +303,7 @@ The config file (YAML) holds only what to sync:
 |-------------------|----------|-----------------------------------------------------------------|
 | `timeout`         | no       | Per-request HTTP timeout, e.g. `45s` (default `30s`).           |
 | `markdown.margin` | no       | Hard-wrap column for Markdown text; `0`/unset = no wrap.        |
-| `comments`        | no       | Pull comments as `[!comment]` callouts, push replies (off).     |
+| `comments`        | no       | Pull comments as read-only `[!comment]` callouts (off).         |
 | `pages`           | no²      | Map of destination `.md` under the sync root → Confluence path. |
 | `folders`         | no²      | Map of destination dir under the sync root → Confluence folder. |
 | `spaces`          | no²      | Map of destination dir under the sync root → Confluence space.  |
@@ -413,15 +414,19 @@ alongside the body:
 - **Footer comments** — and any inline comment whose anchor text no longer exists
   in the body — collect in a trailing `## Comments` section.
 
-To **reply**, add a nested callout with no `id:` under a thread and push; it is
-created on Confluence (a reply whose text already exists is not sent twice).
-Otherwise comments are a read-only overlay: a push **strips** them before
-reconstructing the body, so it never alters the page, and changing a thread's
-resolution is reported as unsupported because the Confluence REST API cannot
-write it. Edit the reply text, not the `[!comment]` metadata lines or the
-`[^cf-…]` anchors — those are `cfsync`-managed. Comments are not versioned with
-the page, so every pull re-fetches them; a note left comment-free by an earlier
-pull picks them up on the next one.
+Comments are a **read-only overlay, managed entirely on Confluence.** A push
+**strips** the callouts and `[^cf-…]` anchors before reconstructing the body, so
+it never sends a reply, resolution, or new comment — reply to, resolve, and edit
+comments in the Confluence UI. What a push *does* guarantee is that it never
+detaches an existing comment: a Confluence inline comment is an anchor mark the
+platform owns and the body can't otherwise express, so before each update the
+push re-grafts the live page's comment anchors onto the body. A comment survives
+as long as the text it highlights still exists; only rewriting the highlighted
+words themselves detaches it (there is then nowhere to anchor). Edit prose
+freely — just don't hand-edit the `[!comment]` metadata lines or the `[^cf-…]`
+anchors, which are `cfsync`-managed. Comments are not versioned with the page, so
+every pull re-fetches them; a note left comment-free by an earlier pull picks
+them up on the next one.
 
 You freely edit prose, headings, list items, blockquotes, panels, expands, and
 table cells, and add paragraphs and images; the frozen ` ```adf ` blocks and

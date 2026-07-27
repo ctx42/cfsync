@@ -11,6 +11,10 @@
 // re-anchor never changes the body and the PutGet law still holds.
 
 import { describe, expect, it } from "vitest";
+import {
+    collectDocAnnotationRuns,
+    graftComments,
+} from "../../../src/adf/lens/annotate.ts";
 import { put } from "../../../src/adf/lens/reconstruct.ts";
 import { marshallMarkdownMapped } from "../../../src/index.ts";
 import { type ADF, type Node, newADF } from "../../../src/models/adf.ts";
@@ -122,5 +126,58 @@ describe("annotation re-anchoring", () => {
         const have = put(base, body, null, null, null);
         expect(renderBody(have)).toBe(body);
         expect(comments(have)).toHaveLength(0);
+    });
+});
+
+// A push grafts the live page's inline-comment marks onto the outgoing body so
+// a comment is never dropped when the local reconstruct fails to carry it — the
+// live page is the authoritative source of the anchors Confluence owns.
+describe("graftComments: preserving live comments on push", () => {
+    // plain is the same document as `commented` but with the annotation stripped,
+    // standing in for a rebuilt push body that lost the comment.
+    const plain = `{ "adf": { "type": "doc", "content": [
+       { "type": "paragraph", "attrs": { "localId": "p" }, "content": [
+          { "type": "text", "text": "Change data type name on the screen." }
+       ] } ] } }`;
+
+    it("re-anchors a live comment the rebuilt body dropped", () => {
+        const live = newADF(commented);
+        const doc = newADF(plain).doc;
+        graftComments(doc, collectDocAnnotationRuns(live.doc));
+        const have: ADF = { ...newADF(plain), doc };
+        expect(commentText(have, "c1")).toBe("data type name");
+    });
+
+    it("leaves an already-anchored comment untouched (no duplicate)", () => {
+        const live = newADF(commented);
+        const doc = newADF(commented).doc;
+        graftComments(doc, collectDocAnnotationRuns(live.doc));
+        const have: ADF = { ...newADF(commented), doc };
+        // Still exactly one annotated run, unchanged.
+        expect(comments(have)).toEqual([{ id: "c1", text: "data type name" }]);
+    });
+
+    it("drops a comment whose text no longer occurs in the body", () => {
+        const live = newADF(commented);
+        const edited = `{ "adf": { "type": "doc", "content": [
+           { "type": "paragraph", "attrs": { "localId": "p" }, "content": [
+              { "type": "text", "text": "Change the field label on the screen." }
+           ] } ] } }`;
+        const doc = newADF(edited).doc;
+        graftComments(doc, collectDocAnnotationRuns(live.doc));
+        expect(comments({ ...newADF(edited), doc })).toHaveLength(0);
+    });
+
+    it("drops a comment whose text is ambiguous across two blocks", () => {
+        const live = newADF(commented);
+        // "data type name" now appears in two paragraphs — no single anchor.
+        const twice = `{ "adf": { "type": "doc", "content": [
+           { "type": "paragraph", "content": [
+              { "type": "text", "text": "Change data type name here." } ] },
+           { "type": "paragraph", "content": [
+              { "type": "text", "text": "And data type name there." } ] } ] } }`;
+        const doc = newADF(twice).doc;
+        graftComments(doc, collectDocAnnotationRuns(live.doc));
+        expect(comments({ ...newADF(twice), doc })).toHaveLength(0);
     });
 });

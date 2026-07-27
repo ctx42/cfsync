@@ -12,6 +12,10 @@
 // {@link Reporter}, and {@link Yaml} ports; the run is sequential. New-image
 // upload lands in the second layer; page creation + create-and-restrict is M7.4.
 
+import {
+    collectDocAnnotationRuns,
+    graftComments,
+} from "../adf/lens/annotate.ts";
 import { MergeConflictError, merge3Links } from "../adf/lens/merge.ts";
 import type { NewImage } from "../adf/lens/reconstruct.ts";
 import { stripCommentDecorations } from "../adf/render/comments.ts";
@@ -26,12 +30,11 @@ import {
 import type { Config } from "../config/config.ts";
 import type { ConfluenceClient, PageData } from "../confluence/client.ts";
 import type { Flavor } from "../flavor/flavor.ts";
-import { type ADF, newADF } from "../models/adf.ts";
+import { type ADF, type Node, newADF } from "../models/adf.ts";
 import type { FileSystem } from "../ports/fs.ts";
 import type { Reporter } from "../ports/progress.ts";
 import type { Yaml } from "../ports/yaml.ts";
 import { posixJoin } from "../util/path.ts";
-import { type CommentSync, syncComments } from "./comments.ts";
 import {
     type CreateInput,
     classifyCreates,
@@ -489,8 +492,7 @@ export class Pusher {
             }
 
             try {
-                const { changed, version, warning, comments } =
-                    await this.pushOne(dest);
+                const { changed, version, warning } = await this.pushOne(dest);
                 const line = changed
                     ? `pushing ${name} ... ok (v${version})\n`
                     : `pushing ${name} ... unchanged\n`;
@@ -502,7 +504,6 @@ export class Pusher {
                     this.d.reporter.log(warnLine);
                     out.warnings.push(`${name}: ${warning}`);
                 }
-                this.reportComments(name, comments, out);
                 if (changed) {
                     out.pushed++;
                 } else {
@@ -513,34 +514,6 @@ export class Pusher {
             }
         }
         return out;
-    }
-
-    /**
-     * reportComments folds a page's comment write-back outcome into the run log
-     * and tallies: each applied change as an indented `comment:` line, each
-     * non-fatal problem as a `warning:` line also collected into
-     * {@link PushOutcome.warnings}. A null outcome (comment sync off) or an empty
-     * one adds nothing.
-     */
-    private reportComments(
-        name: string,
-        comments: CommentSync | null,
-        out: PushOutcome,
-    ): void {
-        if (comments === null) {
-            return;
-        }
-        for (const action of comments.actions) {
-            const line = `      comment: ${action}\n`;
-            out.log += line;
-            this.d.reporter.log(line);
-        }
-        for (const warning of comments.warnings) {
-            const line = `      warning: ${warning}\n`;
-            out.log += line;
-            this.d.reporter.log(line);
-            out.warnings.push(`${name}: ${warning}`);
-        }
     }
 
     /**
@@ -703,10 +676,8 @@ export class Pusher {
         changed: boolean;
         version: number;
         warning: string;
-        /** The comment write-back outcome, or null when comment sync is off. */
-        comments: CommentSync | null;
     }> {
-        const { meta, body, rawBody, base, bodyLine } = await loadPushInput(
+        const { meta, body, base, bodyLine } = await loadPushInput(
             this.d.fs,
             this.d.yaml,
             this.d.cacheDir,
@@ -753,17 +724,10 @@ export class Pusher {
                 meta.title === base.title
             ) {
                 await deleteAttachments(this.d.client, uploaded);
-                // The body did not change, but the note may still carry comment
-                // replies or a toggled resolution to write back.
-                const comments = await this.commentWriteback(
-                    meta.pageId,
-                    rawBody,
-                );
                 return {
                     changed: false,
                     version: meta.pageVersion,
                     warning: "",
-                    comments,
                 };
             }
 
@@ -826,37 +790,15 @@ export class Pusher {
                     `pushed v${pushed.version} but refreshing the local ` +
                     `copy failed: ${message(err)}`;
             }
-            // The remote body is live; write back any comment edits too. A sent
-            // reply is deduped by text on the next push, so the note keeping its
-            // id-less callout (until a re-pull re-renders it) never double-sends.
-            const comments = await this.commentWriteback(meta.pageId, rawBody);
             return {
                 changed: true,
                 version: pushed.version,
                 warning,
-                comments,
             };
         } catch (err) {
             await deleteAttachments(this.d.client, uploaded);
             throw err;
         }
-    }
-
-    /**
-     * commentWriteback applies the note's comment edits (replies, resolutions) to
-     * the page when comment sync is enabled ({@link Config.comments}), returning
-     * the outcome, or null when it is off. It runs only after the body push has
-     * succeeded, so a failed page never leaves stray replies; {@link syncComments}
-     * itself never throws, so a comment problem is a warning, not a push failure.
-     */
-    private commentWriteback(
-        pageId: string,
-        rawBody: string,
-    ): Promise<CommentSync | null> {
-        if (!this.d.config.comments) {
-            return Promise.resolve(null);
-        }
-        return syncComments(this.d.client, pageId, rawBody);
     }
 }
 
@@ -1025,8 +967,6 @@ export async function loadPushInput(
 ): Promise<{
     meta: PushMeta;
     body: string;
-    /** The note body with its comment decorations intact, for the comment sync. */
-    rawBody: string;
     base: ADF;
     bodyLine: number;
 }> {
@@ -1044,8 +984,7 @@ export async function loadPushInput(
     }
     const { frontmatter, body: rawBody, bodyLine } = splitFrontmatter(edited);
     // Drop the read-only comment decorations before the body reaches the lens, so
-    // the reconstructed ADF is the comment-free document Confluence expects. The
-    // raw body (decorations intact) is carried through for the comment write-back.
+    // the reconstructed ADF is the comment-free document Confluence expects.
     const body = stripCommentDecorations(rawBody);
     const meta = parseMeta(yaml.parse(frontmatter));
     if (meta.pageId === "" || meta.pageVersion === 0) {
@@ -1057,7 +996,7 @@ export async function loadPushInput(
         pageName(config.syncRoot, dest),
         meta.pageVersion,
     );
-    return { meta, body, rawBody, base, bodyLine };
+    return { meta, body, base, bodyLine };
 }
 
 /**
@@ -1115,7 +1054,9 @@ async function readCache(
 /**
  * pushDoc fetches the live page and returns the ADF JSON and version to PUT. When
  * the remote still matches the note's base version it pushes `docJSON` at the next
- * version; when it has moved on it rebases via {@link mergeOntoLive}.
+ * version; when it has moved on it rebases via {@link mergeOntoLive}. Either way,
+ * the live page's inline-comment anchors are grafted onto the outgoing body (see
+ * {@link preserveLiveComments}), so a push never detaches a Confluence comment.
  */
 async function pushDoc(
     client: ConfluenceClient,
@@ -1131,21 +1072,49 @@ async function pushDoc(
     bodyLine: number,
 ): Promise<{ docJSON: string; version: number }> {
     const data = await client.fetchPage(meta.pageId);
-    if (data.version === meta.pageVersion) {
-        return { docJSON, version: meta.pageVersion + 1 };
+    const live = liveADF(data);
+    const pushed =
+        data.version === meta.pageVersion
+            ? { docJSON, version: meta.pageVersion + 1 }
+            : mergeOntoLive(
+                  base,
+                  live,
+                  meta,
+                  body,
+                  assets,
+                  images,
+                  links,
+                  flavor,
+                  force,
+                  bodyLine,
+              );
+    return {
+        docJSON: preserveLiveComments(pushed.docJSON, live),
+        version: pushed.version,
+    };
+}
+
+/**
+ * preserveLiveComments re-anchors the live Confluence page's inline-comment marks
+ * onto the outgoing body before it is PUT. Confluence owns these `annotation`
+ * marks and uses them as each comment's anchor, so a body update that drops one
+ * makes the comment vanish. The reconstruct already carries a comment forward on
+ * an unedited block and re-anchors it across an edit that keeps the commented
+ * text ({@link reanchorAnnotations}), but its source is the possibly-stale local
+ * baseline; grafting from the live page (the authoritative source) closes the
+ * gap, and a comment whose anchor is already present is left untouched. A comment
+ * whose commented text the edit rewrote — or made ambiguous — is still the one
+ * unavoidable loss (see {@link graftComments}). With no live comments this is a
+ * cheap no-op.
+ */
+function preserveLiveComments(docJSON: string, live: ADF): string {
+    const runs = collectDocAnnotationRuns(live.doc);
+    if (runs.length === 0) {
+        return docJSON;
     }
-    return mergeOntoLive(
-        base,
-        liveADF(data),
-        meta,
-        body,
-        assets,
-        images,
-        links,
-        flavor,
-        force,
-        bodyLine,
-    );
+    const doc = JSON.parse(docJSON) as Node;
+    graftComments(doc, runs);
+    return JSON.stringify(doc);
 }
 
 /**

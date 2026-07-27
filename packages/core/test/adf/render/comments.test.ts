@@ -9,10 +9,7 @@
 // existing sourcemap/markdown suites).
 
 import { describe, expect, it } from "vitest";
-import {
-    parseCommentThreads,
-    stripCommentDecorations,
-} from "../../../src/adf/render/comments.ts";
+import { stripCommentDecorations } from "../../../src/adf/render/comments.ts";
 import type {
     CommentThread,
     RenderComments,
@@ -207,63 +204,5 @@ describe("comment decoration", () => {
         expect(out).toContain("## Comments");
         expect(out).toContain("> [!comment] id:C9 · @jsmith");
         expect(out).toContain("dangling");
-    });
-});
-
-describe("parseCommentThreads", () => {
-    it("reads id and resolution, and finds a new untagged reply", () => {
-        const body = [
-            "> [!comment] id:C1 · @jsmith · 2026-07-20T10:00:00Z · open",
-            "> Where from?",
-            "> > [!comment] id:C2 · @rzajac · 2026-07-21T09:00:00Z",
-            "> > The appendix.",
-            "> > [!comment]",
-            "> > Actually section 4.",
-        ].join("\n");
-
-        expect(parseCommentThreads(body)).toEqual([
-            {
-                id: "C1",
-                resolution: "open",
-                newReplies: [{ parentId: "C1", text: "Actually section 4." }],
-            },
-        ]);
-    });
-
-    it("reflects an edited resolution token", () => {
-        const body = "> [!comment] id:C1 · @jsmith · resolved\n> Where from?";
-        expect(parseCommentThreads(body)[0]).toMatchObject({
-            id: "C1",
-            resolution: "resolved",
-            newReplies: [],
-        });
-    });
-
-    it("parents a new reply nested under an existing reply", () => {
-        const body = [
-            "> [!comment] id:C1 · @jsmith · open",
-            "> Q",
-            "> > [!comment] id:C2 · @rzajac",
-            "> > A",
-            "> > > [!comment]",
-            "> > > follow-up",
-        ].join("\n");
-
-        expect(parseCommentThreads(body)[0]?.newReplies).toEqual([
-            { parentId: "C2", text: "follow-up" },
-        ]);
-    });
-
-    it("ignores non-callout blocks and the trailing heading", () => {
-        const body = [
-            "Just a paragraph.",
-            "",
-            "## Comments",
-            "",
-            "> [!comment] id:F1 · @jsmith",
-            "> Page note.",
-        ].join("\n");
-
-        expect(parseCommentThreads(body).map((t) => t.id)).toEqual(["F1"]);
     });
 });

@@ -86,6 +86,101 @@ export function reanchorAnnotations(content: Node[], runs: AnnRun[]): Node[] {
     return out;
 }
 
+/**
+ * collectDocAnnotationRuns collects every inline-comment annotation run across a
+ * whole document, not just one leaf: it visits each node and reads the runs from
+ * its direct text children (see {@link collectAnnotationRuns}), which is a no-op
+ * on a container's leaf children, so every run is gathered exactly once. It is
+ * the input to {@link graftComments}, which re-anchors the live page's comments
+ * onto a rebuilt push body.
+ */
+export function collectDocAnnotationRuns(doc: Node): AnnRun[] {
+    const runs: AnnRun[] = [];
+    const walk = (nod: Node): void => {
+        runs.push(...collectAnnotationRuns(nod.content ?? []));
+        for (const child of nod.content ?? []) {
+            walk(child);
+        }
+    };
+    walk(doc);
+    return runs;
+}
+
+/**
+ * graftComments re-anchors the inline-comment annotations in `runs` — typically
+ * the *live* Confluence body's, the authoritative source — onto `doc` in place,
+ * so a rebuilt push body never detaches a comment whose anchored text still
+ * exists. Confluence owns these marks (it injects one when a comment is created
+ * and uses it as the anchor), so a PUT that drops one makes the comment vanish;
+ * grafting them back guarantees a push leaves comments intact.
+ *
+ * A run whose id is already present in `doc` is left alone (the rebuild kept it);
+ * one whose covered text occurs exactly once across the whole document is
+ * anchored there; one that occurs zero times (the edit rewrote the commented
+ * words) or more than once (an ambiguous anchor) is dropped — the same
+ * "anchor only when unambiguous" contract as {@link reanchorAnnotations}, applied
+ * document-wide rather than per-leaf. The uniqueness count is global, so a comment
+ * is never anchored to the wrong one of two identical spans in different blocks.
+ */
+export function graftComments(doc: Node, runs: AnnRun[]): void {
+    const present = new Set<string>();
+    const leaves: Node[] = [];
+    const scan = (nod: Node): void => {
+        if (nod.type === "text") {
+            for (const m of nod.marks ?? []) {
+                if (m.type === "annotation") {
+                    present.add(attrStr(m.attrs, "id"));
+                }
+            }
+        }
+        if ((nod.content ?? []).some((c) => c.type === "text")) {
+            leaves.push(nod);
+        }
+        for (const child of nod.content ?? []) {
+            scan(child);
+        }
+    };
+    scan(doc);
+
+    for (const run of runs) {
+        const id = attrStr(run.mark.attrs, "id");
+        if (id === "" || run.text === "" || present.has(id)) {
+            continue;
+        }
+        let total = 0;
+        for (const leaf of leaves) {
+            total += countOccurrences(leaf.content ?? [], run.text);
+        }
+        if (total !== 1) {
+            continue; // no anchor, or an ambiguous one — drop, never guess
+        }
+        for (const leaf of leaves) {
+            const before = leaf.content ?? [];
+            const after = applyAnnotation(before, run.text, run.mark);
+            if (after !== before) {
+                leaf.content = after;
+                break; // the sole global hit; other leaves returned unchanged
+            }
+        }
+        present.add(id);
+    }
+}
+
+/** countOccurrences counts target's occurrences across content's text-node bands. */
+function countOccurrences(content: Node[], target: string): number {
+    let n = 0;
+    for (const band of bandsOf(content)) {
+        for (
+            let idx = band.text.indexOf(target);
+            idx !== -1;
+            idx = band.text.indexOf(target, idx + target.length)
+        ) {
+            n++;
+        }
+    }
+    return n;
+}
+
 /** Band is a maximal run of adjacent text nodes, with their concatenated text. */
 interface Band {
     /** Index of the first text node of the band in the content array. */
