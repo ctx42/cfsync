@@ -584,9 +584,17 @@ export class Puller {
      * - the note has no readable frontmatter (foreign or corrupt): overwrite it,
      *   healing the managed note (matches the pre-merge behavior);
      * - local matches base (no local edits): take the remote (`wrote`/`kept`);
-     * - remote matches base (no remote change): keep the local edits (`kept`);
      * - both changed: three-way merge in place, writing the remote frontmatter
      *   over the merged body — cleanly (`merged`) or with markers (`conflict`).
+     *
+     * The comment overlay ({@link stripCommentDecorations}: `[^cf-…]` anchors and
+     * `[!comment]` callouts) is cfsync's, not a user edit, so it is stripped from
+     * both local and base before the comparison and merge — only the fresh render
+     * (`remote`, which still carries the overlay) supplies it. This is what makes a
+     * stale overlay baked into the note disappear: a since-resolved comment is
+     * absent from the render, so once local's copy is stripped it survives in none
+     * of the three merge inputs and is dropped, while the user's real edits (present
+     * in the stripped local) still merge through.
      *
      * The remote frontmatter carries the current version, so a later push treats
      * the resolved note as based on that version rather than re-merging.
@@ -626,40 +634,45 @@ export class Puller {
             return wrote ? "wrote" : "kept";
         }
 
-        // Comments are an unversioned overlay cfsync adds on pull, not user edits.
-        // When the note and the fresh render differ ONLY by that overlay, take the
-        // render so the note picks up the current comments. This also self-heals a
-        // note the pre-fix cache-ordering bug left comment-free (its cached base
-        // was clobbered, so the version compare below would wrongly keep it). A
-        // real body edit survives: stripping the overlay leaves the bodies
-        // different, so this does not fire and the merge below runs.
-        if (
-            stripCommentDecorations(localFm.body) ===
-            stripCommentDecorations(remoteFm.body)
-        ) {
+        // Merge on comment-free bodies: the overlay is cfsync's, not a user edit,
+        // so it must never be carried over from the note. Local and base are
+        // stripped; the fresh render (remoteFm.body) keeps its overlay and is the
+        // sole source of the current comments in the merge. A stale overlay in the
+        // note (e.g. a since-resolved comment) is thus in none of the three inputs
+        // and drops out.
+        const localBody = stripCommentDecorations(localFm.body);
+        // When the note and the render differ ONLY by that overlay, take the render
+        // so the note picks up the current comments. This also self-heals a note
+        // the pre-fix cache-ordering bug left comment-free (its cached base was
+        // clobbered, so the version compare below would wrongly keep it).
+        if (localBody === stripCommentDecorations(remoteFm.body)) {
             const wrote = await writeIfChanged(this.d.fs, dest, remote);
             return wrote ? "wrote" : "kept";
         }
 
         const noteVersion = frontmatterVersion(localFm.frontmatter);
-        const base =
+        const rawBase =
             noteVersion > 0
                 ? await this.readBaseBody(page.name, noteVersion)
                 : null;
-        if (base !== null && localFm.body === base) {
-            // No local edits; the remote moved on — take it.
+        const base = rawBase === null ? null : stripCommentDecorations(rawBase);
+        if (base !== null && localBody === base) {
+            // No real edits; the remote moved on — take it (body + fresh overlay).
             const wrote = await writeIfChanged(this.d.fs, dest, remote);
             return wrote ? "wrote" : "kept";
         }
-        if (base !== null && remoteFm.body === base) {
-            // Local edits only; the remote is unchanged — keep the edits.
-            return "kept";
-        }
 
-        const result = mergeThreeWay(base ?? "", localFm.body, remoteFm.body, {
+        const result = mergeThreeWay(base ?? "", localBody, remoteFm.body, {
             local: "local (your edits)",
             remote: `remote (Confluence v${page.version})`,
         });
+        // A three-way merge whose result reproduces the note byte-for-byte means
+        // the remote body was unchanged and the note's only real content was its
+        // edits — nothing to write (keep the edits, and any overlay they already
+        // carry stays put).
+        if (!result.conflict && result.text === localFm.body) {
+            return "kept";
+        }
         await this.d.fs.write(
             dest,
             assembleNote(remoteFm.frontmatter, result.text),
@@ -1428,23 +1441,29 @@ async function isDivergent(
     return base === null || body !== base;
 }
 
+/** The resolution word marking a settled inline comment, dropped on pull. */
+const RESOLVED = "resolved";
+
 /**
  * toRenderComments projects the client's fetched {@link PageComments} onto the
  * render's {@link RenderComments}: inline comments carrying a marker are keyed by
- * it for anchor placement, and footer comments — plus any inline comment with no
- * marker — become trailing threads. Each comment's ADF body is parsed to its
- * block nodes for the callout.
+ * it for anchor placement, and footer (page-level) comments become trailing
+ * threads. Each comment's ADF body is parsed to its block nodes for the callout.
+ *
+ * Only comments Confluence shows on the page are kept, so the note matches the CF
+ * view. Dropped: resolved inline comments (a settled thread), and inline comments
+ * with no marker (unanchored). A marker that survives here but is not found in the
+ * body at render time is dangling — its highlighted text was deleted, so CF hides
+ * it — and the render drops it too (see {@link trailingComments}).
  */
 function toRenderComments(comments: PageComments): RenderComments {
     const byMarker = new Map<string, CommentThread>();
     const trailing: CommentThread[] = [];
     for (const c of comments.inline) {
-        const thread = toThread(c);
-        if (thread.markerRef !== "") {
-            byMarker.set(thread.markerRef, thread);
-        } else {
-            trailing.push(thread);
+        if (c.resolution === RESOLVED || c.markerRef === "") {
+            continue;
         }
+        byMarker.set(c.markerRef, toThread(c));
     }
     for (const c of comments.footer) {
         trailing.push(toThread(c));

@@ -130,12 +130,12 @@ export function marshallMapped(
                 b += `\n\n${callouts}`;
             }
         }
-        const trailing = comments ? trailingComments(comments, ctx, used) : "";
+        const trailing = comments ? trailingComments(comments, ctx) : "";
         if (trailing !== "") {
             b += `\n\n${trailing}`;
         }
     } else {
-        const trailing = comments ? trailingComments(comments, ctx, used) : "";
+        const trailing = comments ? trailingComments(comments, ctx) : "";
         if (trailing !== "") {
             b += "\n\n";
             sm.bodyStart = b.length;

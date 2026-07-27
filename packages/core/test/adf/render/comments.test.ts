@@ -184,7 +184,10 @@ describe("comment decoration", () => {
         expect(JSON.stringify(rebuilt.doc)).toBe(JSON.stringify(base.doc));
     });
 
-    it("puts an inline comment whose marker is absent from the body in the trailing section", () => {
+    it("drops an inline comment whose marker is absent from the body (dangling)", () => {
+        // Its highlighted text was deleted, so Confluence no longer shows it on the
+        // page; the render matches CF and omits it rather than surfacing it in a
+        // trailing section.
         const orphan: CommentThread = {
             id: "C9",
             markerRef: "GONE",
@@ -201,8 +204,8 @@ describe("comment decoration", () => {
 
         const out = body(doc, comments);
         expect(out).not.toContain("[^cf-");
-        expect(out).toContain("## Comments");
-        expect(out).toContain("> [!comment] id:C9 · @jsmith");
-        expect(out).toContain("dangling");
+        expect(out).not.toContain("## Comments");
+        expect(out).not.toContain("[!comment]");
+        expect(out).not.toContain("dangling");
     });
 });

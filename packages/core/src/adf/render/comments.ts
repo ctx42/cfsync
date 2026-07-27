@@ -93,26 +93,20 @@ export function blockComments(
 
 /**
  * trailingComments returns the trailing `## Comments` section: the footer
- * comments plus any inline thread whose marker `used` did not cover (its anchor
- * was not found in the body — a dangling comment), each as a `[!comment]`
- * callout. It returns `""` when there is nothing to place there, so a page with
- * only anchored inline comments grows no trailing section.
+ * (page-level) comments, each as a `[!comment]` callout. It returns `""` when
+ * there are none, so a page with only anchored inline comments grows no trailing
+ * section. An inline thread whose marker was not found in the body is dangling —
+ * its highlighted text was deleted, so Confluence no longer shows it on the page —
+ * and is dropped here rather than surfaced, keeping the note in step with the CF
+ * view.
  */
-export function trailingComments(
-    comments: RenderComments,
-    ctx: MdCtx,
-    used: Set<string>,
-): string {
-    const threads: CommentThread[] = [...comments.trailing];
-    for (const [ref, thread] of comments.byMarker) {
-        if (!used.has(ref)) {
-            threads.push(thread);
-        }
-    }
-    if (threads.length === 0) {
+export function trailingComments(comments: RenderComments, ctx: MdCtx): string {
+    if (comments.trailing.length === 0) {
         return "";
     }
-    const callouts = threads.map((t) => calloutLines(t, ctx, 0).join("\n"));
+    const callouts = comments.trailing.map((t) =>
+        calloutLines(t, ctx, 0).join("\n"),
+    );
     return `${TRAILING_COMMENTS_HEADING}\n\n${callouts.join("\n\n")}`;
 }
 

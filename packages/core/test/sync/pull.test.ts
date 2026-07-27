@@ -342,6 +342,178 @@ describe("Puller.pullPages", () => {
         );
     });
 
+    it("drops a resolved inline comment on pull", async () => {
+        const config = buildConfig(
+            {
+                pages: { "notes/page.md": "/wiki/spaces/X/pages/123/Title" },
+                comments: true,
+            },
+            {
+                site: "ex",
+                account: "a@ex.com",
+                token: "secret",
+                syncRoot: "/vault",
+            },
+        );
+        // Same "world" run carries the annotation, but its comment is resolved.
+        const adf = {
+            version: 1,
+            type: "doc",
+            content: [
+                {
+                    type: "paragraph",
+                    content: [
+                        { type: "text", text: "hello " },
+                        {
+                            type: "text",
+                            text: "world",
+                            marks: [
+                                {
+                                    type: "annotation",
+                                    attrs: {
+                                        id: "M1",
+                                        annotationType: "inlineComment",
+                                    },
+                                },
+                            ],
+                        },
+                    ],
+                },
+            ],
+        };
+        const commentBody = {
+            type: "doc",
+            content: [
+                {
+                    type: "paragraph",
+                    content: [{ type: "text", text: "Where from?" }],
+                },
+            ],
+        };
+        const v2 = "https://ex.atlassian.net/wiki/api/v2";
+        const adfQ = "?body-format=atlas_doc_format";
+        const stub = new StubHttpClient()
+            .on("GET", pageURL("123"), { body: pageBody("123", 3, adf) })
+            .on("GET", `${v2}/pages/123/inline-comments${adfQ}`, {
+                body: JSON.stringify({
+                    results: [
+                        {
+                            id: "C1",
+                            resolutionStatus: "resolved",
+                            properties: { inlineMarkerRef: "M1" },
+                            version: {
+                                authorId: "jsmith",
+                                createdAt: "2026-07-20T10:00:00Z",
+                            },
+                            body: {
+                                atlas_doc_format: {
+                                    value: JSON.stringify(commentBody),
+                                },
+                            },
+                        },
+                    ],
+                    _links: {},
+                }),
+            })
+            .on("GET", `${v2}/inline-comments/C1/children${adfQ}`, {
+                body: JSON.stringify({ results: [], _links: {} }),
+            })
+            .on("GET", `${v2}/pages/123/footer-comments${adfQ}`, {
+                body: JSON.stringify({ results: [], _links: {} }),
+            });
+        const { puller, fs } = pullerFor(config, stub);
+
+        const out = await puller.pullPages();
+
+        expect(out.errors).toEqual([]);
+        const note = await fs.readText("/vault/notes/page.md");
+        // No callout, no anchor ref — the resolved thread vanishes.
+        expect(note).toContain("hello world");
+        expect(note).not.toContain("[^cf-M1]");
+        expect(note).not.toContain("[!comment]");
+        expect(note).not.toContain("Where from?");
+    });
+
+    it("drops a dangling inline comment (open, anchor gone) on pull", async () => {
+        const config = buildConfig(
+            {
+                pages: { "notes/page.md": "/wiki/spaces/X/pages/123/Title" },
+                comments: true,
+            },
+            {
+                site: "ex",
+                account: "a@ex.com",
+                token: "secret",
+                syncRoot: "/vault",
+            },
+        );
+        // The body carries no annotation — the comment's highlighted text was
+        // deleted, so its marker "GONE" is absent. Confluence reports it open but
+        // hides it from the page; the pull must not surface it in a trailing section.
+        const adf = {
+            version: 1,
+            type: "doc",
+            content: [
+                {
+                    type: "paragraph",
+                    content: [{ type: "text", text: "hello world" }],
+                },
+            ],
+        };
+        const commentBody = {
+            type: "doc",
+            content: [
+                {
+                    type: "paragraph",
+                    content: [
+                        { type: "text", text: "Anchor text was edited away." },
+                    ],
+                },
+            ],
+        };
+        const v2 = "https://ex.atlassian.net/wiki/api/v2";
+        const adfQ = "?body-format=atlas_doc_format";
+        const stub = new StubHttpClient()
+            .on("GET", pageURL("123"), { body: pageBody("123", 3, adf) })
+            .on("GET", `${v2}/pages/123/inline-comments${adfQ}`, {
+                body: JSON.stringify({
+                    results: [
+                        {
+                            id: "C9",
+                            resolutionStatus: "open",
+                            properties: { inlineMarkerRef: "GONE" },
+                            version: {
+                                authorId: "jsmith",
+                                createdAt: "2026-07-23T08:00:00Z",
+                            },
+                            body: {
+                                atlas_doc_format: {
+                                    value: JSON.stringify(commentBody),
+                                },
+                            },
+                        },
+                    ],
+                    _links: {},
+                }),
+            })
+            .on("GET", `${v2}/inline-comments/C9/children${adfQ}`, {
+                body: JSON.stringify({ results: [], _links: {} }),
+            })
+            .on("GET", `${v2}/pages/123/footer-comments${adfQ}`, {
+                body: JSON.stringify({ results: [], _links: {} }),
+            });
+        const { puller, fs } = pullerFor(config, stub);
+
+        const out = await puller.pullPages();
+
+        expect(out.errors).toEqual([]);
+        const note = await fs.readText("/vault/notes/page.md");
+        expect(note).toContain("hello world");
+        expect(note).not.toContain("## Comments");
+        expect(note).not.toContain("[!comment]");
+        expect(note).not.toContain("Anchor text was edited away.");
+    });
+
     it("self-heals a comment-free note whose cached base was clobbered", async () => {
         // The pre-fix cache-ordering bug left notes comment-free while their
         // cached .vN.md base held the decorated render. A pull must still decorate
@@ -445,6 +617,125 @@ describe("Puller.pullPages", () => {
         const note = await fs.readText("/vault/notes/page.md");
         expect(note).toContain("hello world[^cf-M1]");
         expect(note).toContain("> Where from?");
+        expect(note).not.toContain("<<<<<<<");
+    });
+
+    it("drops a since-resolved comment from an edited note, keeping the edit", async () => {
+        // The note was pulled while the comment was open, so it carries the
+        // callout; the comment has since been resolved, so the render omits it and
+        // the cached base (a fresh render) no longer has it. The callout lives only
+        // in the note — it must not be mistaken for a user edit and preserved. A
+        // real edit in a different block must still survive.
+        const config = buildConfig(
+            {
+                pages: { "notes/page.md": "/wiki/spaces/X/pages/123/Title" },
+                comments: true,
+            },
+            {
+                site: "ex",
+                account: "a@ex.com",
+                token: "secret",
+                syncRoot: "/vault",
+            },
+        );
+        const adf = {
+            version: 1,
+            type: "doc",
+            content: [
+                {
+                    type: "paragraph",
+                    content: [{ type: "text", text: "intro paragraph" }],
+                },
+                {
+                    type: "paragraph",
+                    content: [
+                        { type: "text", text: "hello " },
+                        {
+                            type: "text",
+                            text: "world",
+                            marks: [
+                                {
+                                    type: "annotation",
+                                    attrs: {
+                                        id: "M1",
+                                        annotationType: "inlineComment",
+                                    },
+                                },
+                            ],
+                        },
+                    ],
+                },
+            ],
+        };
+        const commentBody = {
+            type: "doc",
+            content: [
+                {
+                    type: "paragraph",
+                    content: [{ type: "text", text: "Where from?" }],
+                },
+            ],
+        };
+        const v2 = "https://ex.atlassian.net/wiki/api/v2";
+        const adfQ = "?body-format=atlas_doc_format";
+        // The comment is now resolved, so the render omits its callout and anchor.
+        const stub = new StubHttpClient()
+            .on("GET", pageURL("123"), { body: pageBody("123", 3, adf) })
+            .on("GET", `${v2}/pages/123/inline-comments${adfQ}`, {
+                body: JSON.stringify({
+                    results: [
+                        {
+                            id: "C1",
+                            resolutionStatus: "resolved",
+                            properties: { inlineMarkerRef: "M1" },
+                            version: {
+                                authorId: "jsmith",
+                                createdAt: "2026-07-20T10:00:00Z",
+                            },
+                            body: {
+                                atlas_doc_format: {
+                                    value: JSON.stringify(commentBody),
+                                },
+                            },
+                        },
+                    ],
+                    _links: {},
+                }),
+            })
+            .on("GET", `${v2}/inline-comments/C1/children${adfQ}`, {
+                body: JSON.stringify({ results: [], _links: {} }),
+            })
+            .on("GET", `${v2}/pages/123/footer-comments${adfQ}`, {
+                body: JSON.stringify({ results: [], _links: {} }),
+            });
+
+        const fs = new MemFS();
+        // The note: intro edited, plus the stale resolved callout on "world".
+        await fs.write(
+            "/vault/notes/page.md",
+            '---\ncfsync-plugin: pull\ntitle: "Title"\npage_id: "123"\n' +
+                'page_version: 3\nspace_id: "9"\n---\n\n' +
+                "intro paragraph edited\n\nhello world[^cf-M1]\n\n" +
+                "> [!comment] id:C1 · @jsmith · resolved\n> Where from?\n",
+        );
+        // The cached base: a fresh (comment-free) render of the un-edited body.
+        await fs.write(
+            "/data/cache/notes/page.v3.md",
+            "---\npage_version: 3\n---\n\nintro paragraph\n\nhello world\n",
+        );
+        const { puller } = pullerFor(config, stub, fs);
+
+        const out = await puller.pullPages();
+
+        expect(out.errors).toEqual([]);
+        const note = await fs.readText("/vault/notes/page.md");
+        // The resolved thread is gone — no callout, no anchor ref …
+        expect(note).not.toContain("[!comment]");
+        expect(note).not.toContain("[^cf-M1]");
+        expect(note).not.toContain("Where from?");
+        // … but the unrelated edit survives, with no conflict markers.
+        expect(note).toContain("intro paragraph edited");
+        expect(note).toContain("hello world");
         expect(note).not.toContain("<<<<<<<");
     });
 

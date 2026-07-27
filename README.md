@@ -411,8 +411,12 @@ alongside the body:
   text it annotates, and a `> [!comment]` callout after that block. The callout's
   first line carries the thread's id, author, date, and resolution; replies nest
   as deeper callouts.
-- **Footer comments** — and any inline comment whose anchor text no longer exists
-  in the body — collect in a trailing `## Comments` section.
+- **Footer comments** (page-level) collect in a trailing `## Comments` section.
+- The pull mirrors what Confluence shows on the page, so it **omits** two kinds of
+  comment Confluence itself hides: **resolved** inline comments (once a thread is
+  resolved it drops out entirely — reopening it in the UI brings it back on the
+  next pull), and **dangling** inline comments — ones whose highlighted text was
+  deleted, so the anchor no longer exists in the body.
 
 Comments are a **read-only overlay, managed entirely on Confluence.** A push
 **strips** the callouts and `[^cf-…]` anchors before reconstructing the body, so
