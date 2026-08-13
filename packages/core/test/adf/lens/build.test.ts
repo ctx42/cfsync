@@ -102,6 +102,24 @@ describe("put insert round-trip (tabular)", () => {
             wantType: "table",
         },
         { name: "thematic break", body: "---", wantType: "rule" },
+        // A hard break renders as the segment's text followed by `\`, so the
+        // space before the `\` is a trailing space on the ADF text node. Both
+        // spellings must come back byte-identically or PutGet refuses the insert.
+        {
+            name: "paragraph with a spaced hard break",
+            body: "first line. \\\nsecond line.",
+            wantType: "paragraph",
+        },
+        {
+            name: "paragraph with an unspaced hard break",
+            body: "first line.\\\nsecond line.",
+            wantType: "paragraph",
+        },
+        {
+            name: "expand with a spaced hard break",
+            body: "> [!EXPAND] Example\n> **Don't:** this. \\\n> **Do:** that.",
+            wantType: "expand",
+        },
     ];
 
     for (const tc of cases) {

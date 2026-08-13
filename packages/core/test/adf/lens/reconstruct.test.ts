@@ -974,6 +974,44 @@ describe("put nested (lists and panels)", () => {
         expect(p1?.content?.[2]?.text).toBe("beta");
     });
 
+    it("keeps the space a hard break sits behind when the text is edited", () => {
+        // Confluence stores the space before a `\` hard break as a trailing
+        // space on the text node, and the render emits it verbatim. Dropping it
+        // on the reparse re-renders the block one space short and PutGet refuses
+        // the edit.
+        const base = newADF(`{ "adf": { "type": "doc", "content": [
+           { "type": "paragraph", "attrs": { "localId": "p1" }, "content": [
+              { "type": "text", "text": "alpha. " },
+              { "type": "hardBreak" },
+              { "type": "text", "text": "beta." } ] } ] } }`);
+        expect(renderBody(base)).toBe("alpha. \\\nbeta.");
+        const out = put(base, "ALPHA. \\\nbeta.", null, null, null);
+        const p1 = out.doc.content?.[0];
+        expect(p1?.content?.[0]?.text).toBe("ALPHA. ");
+        expect(p1?.content?.[1]?.type).toBe("hardBreak");
+        expect(p1?.content?.[2]?.text).toBe("beta.");
+    });
+
+    it("keeps a quoted block's hard-break space when its text is edited", () => {
+        // The quoted-body path (panel, expand, blockquote) joins the physical
+        // lines itself, so it has its own hard-break split to keep the space in.
+        const base = newADF(`{ "adf": { "type": "doc", "content": [
+           { "type": "expand", "attrs": { "title": "Example", "localId": "ex" },
+             "content": [ { "type": "paragraph", "content": [
+                { "type": "text", "text": "don't: this. " },
+                { "type": "hardBreak" },
+                { "type": "text", "text": "do: that." } ] } ] } ] } }`);
+        const body = renderBody(base);
+        expect(body).toBe(
+            "> [!EXPAND] Example\n> don't: this. \\\n> do: that.",
+        );
+        const out = put(base, body.replace("this", "THIS"), null, null, null);
+        const para = out.doc.content?.[0]?.content?.[0];
+        expect(para?.content?.[0]?.text).toBe("don't: THIS. ");
+        expect(para?.content?.[1]?.type).toBe("hardBreak");
+        expect(para?.content?.[2]?.text).toBe("do: that.");
+    });
+
     it("editing panel body text keeps its type", () => {
         const base = newADF(`{ "adf": { "type": "doc", "content": [
            { "type": "panel", "attrs": { "panelType": "info", "localId": "pn" },

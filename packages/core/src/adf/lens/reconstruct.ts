@@ -604,9 +604,34 @@ function parseSegments(text: string, sep: string, pc: ParseCtx): Node[] {
         if (i > 0) {
             content.push({ type: "hardBreak" });
         }
-        content.push(...parseInline(unwrap(seg), pc));
+        const nodes = parseInline(unwrap(seg), pc);
+        if (i < segments.length - 1) {
+            keepBreakSpace(nodes, seg);
+        }
+        content.push(...nodes);
     }
     return content;
+}
+
+/**
+ * keepBreakSpace restores the space a hard break's separator sits behind. The
+ * render emits a segment's text verbatim and appends the separator, so the space
+ * in ` \` (or ` <br>`) is a trailing space on the segment's last ADF text node —
+ * the shape Confluence stores — which {@link unwrap} collapses away as layout.
+ * Without it the rebuilt segment re-renders one space short and PutGet refuses a
+ * faithful edit. A segment that parsed to nothing is left alone: a whitespace-only
+ * text node is not worth minting.
+ */
+function keepBreakSpace(nodes: Node[], seg: string): void {
+    if (!/[ \t]$/.test(seg) || nodes.length === 0) {
+        return;
+    }
+    const last = nodes[nodes.length - 1];
+    if (last?.type === "text" && last.text !== undefined) {
+        last.text += " ";
+        return;
+    }
+    nodes.push({ type: "text", text: " " });
 }
 
 /**
@@ -1188,15 +1213,19 @@ function splitBlankLineParagraphs(text: string): string[] {
 /**
  * joinSoftWrapLines joins a paragraph's physical lines: soft wraps become spaces,
  * and a trailing backslash hard break is re-emitted as `\\\n` between segments so
- * it matches the render and {@link rebuildInline}.
+ * it matches the render and {@link rebuildInline}. A space the break sits behind
+ * is kept, since it is content of the ADF text node rather than layout (see
+ * {@link keepBreakSpace}).
  */
 function joinSoftWrapLines(lines: string[]): string {
     const segs: string[] = [];
     let soft: string[] = [];
     for (const ln of lines) {
         if (hardBreakLine(ln)) {
-            soft.push(ln.replace(/\\$/, ""));
-            segs.push(unwrap(soft.join(" ")));
+            const bare = ln.replace(/\\$/, "");
+            soft.push(bare);
+            const pad = /[ \t]$/.test(bare) ? " " : "";
+            segs.push(unwrap(soft.join(" ")) + pad);
             soft = [];
             continue;
         }
