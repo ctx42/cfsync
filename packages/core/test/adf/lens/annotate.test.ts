@@ -97,6 +97,29 @@ describe("annotation re-anchoring", () => {
         expect(comments(have)).toHaveLength(0); // nowhere to re-anchor
     });
 
+    it("keeps the comment when the edit only changes the text's case", () => {
+        const base = newADF(commented);
+        const body = renderBody(base).replace(
+            "data type name",
+            "Data Type Name",
+        );
+        const have = put(base, body, null, null, null);
+        expect(renderBody(have)).toBe(body);
+        expect(commentText(have, "c1")).toBe("Data Type Name");
+    });
+
+    it("keeps the comment on a near-match of the edited text", () => {
+        const base = newADF(commented);
+        // One changed character in fourteen is within the near-match bound.
+        const body = renderBody(base).replace(
+            "data type name",
+            "data-type name",
+        );
+        const have = put(base, body, null, null, null);
+        expect(renderBody(have)).toBe(body);
+        expect(commentText(have, "c1")).toBe("data-type name");
+    });
+
     it("keeps a comment whose text is split across a bold boundary", () => {
         const split = `{ "adf": { "type": "doc", "content": [
            { "type": "paragraph", "attrs": { "localId": "p" }, "content": [
@@ -228,6 +251,35 @@ describe("graftComments: preserving live comments on push", () => {
         const have: ADF = { ...newADF(moved), doc };
         expect(comments(have)).toEqual([{ id: "c1", text: "data type name" }]);
         expect(annotatedBlocks(have, "c1")).toEqual([2]);
+    });
+
+    it("re-anchors a near-match only in the comment's own block", () => {
+        const live = newADF(commented);
+        // The own block (localId p) now reads "data-type name"; the new block
+        // holds "data type names" — a near-match too, but not the comment's
+        // block, so the comment goes to p.
+        const src = `{ "adf": { "type": "doc", "content": [
+           { "type": "paragraph", "attrs": { "localId": "q" }, "content": [
+              { "type": "text", "text": "Many data type names." } ] },
+           { "type": "paragraph", "attrs": { "localId": "p" }, "content": [
+              { "type": "text", "text": "Change data-type name on the screen." }
+           ] } ] } }`;
+        const doc = newADF(src).doc;
+        graftComments(doc, collectDocAnnotationRuns(live.doc));
+        const have: ADF = { ...newADF(src), doc };
+        expect(comments(have)).toEqual([{ id: "c1", text: "data-type name" }]);
+        expect(annotatedBlocks(have, "c1")).toEqual([1]);
+    });
+
+    it("never near-matches in a block other than the comment's own", () => {
+        const live = newADF(commented);
+        const src = `{ "adf": { "type": "doc", "content": [
+           { "type": "paragraph", "attrs": { "localId": "q" }, "content": [
+              { "type": "text", "text": "Change data-type name here." } ] }
+           ] } }`;
+        const doc = newADF(src).doc;
+        graftComments(doc, collectDocAnnotationRuns(live.doc));
+        expect(comments({ ...newADF(src), doc })).toHaveLength(0);
     });
 
     it("anchors a repeated comment text within one block by its offset", () => {

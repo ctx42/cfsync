@@ -9,9 +9,11 @@
 // text: it finds the exact commented substring in the new content and re-applies
 // the mark. When that text now occurs more than once, the occurrence whose
 // surroundings best match the original is chosen, so an ambiguous anchor never
-// costs a comment. Only a comment whose text the edit changed away no longer
-// matches and is dropped — the one unavoidable loss the design accepts (see the
-// "preserve when the text survives" contract). The render emits no delimiter
+// costs a comment. When it occurs nowhere, the match loosens in two steps —
+// ignoring case, then the closest near-match within the comment's own block —
+// so a light edit to the commented words keeps the comment. Only a comment whose
+// words the edit rewrote beyond that is dropped, and the push refuses to drop an
+// open one unless told to (see the sync layer). The render emits no delimiter
 // for an annotation, so re-anchoring never changes the rebuilt body and the
 // PutGet law still holds.
 
@@ -106,12 +108,11 @@ export function collectAnnotationRuns(content: Node[]): AnnRun[] {
 
 /**
  * reanchorAnnotations re-applies each recovered annotation to newly reparsed
- * content and returns the result. A run is re-anchored wherever its covered text
- * occurs in the content (within a single run of adjacent text nodes); when it
- * occurs more than once, the occurrence best matching the run's original
- * position is chosen (see {@link bestHit}). Only a run whose text occurs nowhere
- * — the edit changed it away — is dropped. Runs are applied in order; splitting a
- * text node preserves its other marks, so a comment on bold text keeps the bold.
+ * content and returns the result. The content is the run's own block rebuilt,
+ * so the anchor is found by {@link findAnchor} with the near-match allowed. Only
+ * a run whose text the edit rewrote beyond a near-match is dropped. Runs are
+ * applied in order; splitting a text node preserves its other marks, so a
+ * comment on bold text keeps the bold.
  */
 export function reanchorAnnotations(content: Node[], runs: AnnRun[]): Node[] {
     let out = content;
@@ -119,21 +120,10 @@ export function reanchorAnnotations(content: Node[], runs: AnnRun[]): Node[] {
         if (run.text === "") {
             continue;
         }
-        const flat = flatText(out);
-        const hits = occurrences(flat, run.text).map((offset) => ({
-            leaf: 0,
-            leafId: "",
-            flat,
-            offset,
-        }));
-        const hit = bestHit(hits, run);
+        const leaf: Leaf = { leaf: 0, leafId: "", flat: flatText(out) };
+        const hit = findAnchor([leaf], run, () => true);
         if (hit !== undefined) {
-            out = applyAt(
-                out,
-                hit.offset,
-                hit.offset + run.text.length,
-                run.mark,
-            );
+            out = applyAt(out, hit.offset, hit.end, run.mark);
         }
     }
     return out;
@@ -179,9 +169,11 @@ export function collectDocAnnotationRuns(doc: Node): AnnRun[] {
  * A run whose id is already present in `doc` is left alone (the rebuild kept it).
  * Otherwise every occurrence of its covered text across the whole document is a
  * candidate, and the one best matching the run's original block and surroundings
- * is anchored (see {@link bestHit}), so text that now also appears elsewhere on
- * the page does not cost the comment. Only a run whose text occurs nowhere — the
- * edit rewrote the commented words — is dropped.
+ * is anchored (see {@link findAnchor}), so text that now also appears elsewhere
+ * on the page does not cost the comment. The block with the run's localId — the
+ * only block known to be the comment's own — is searched first, and the
+ * near-match is confined to it. Only a run the edit rewrote beyond that is
+ * dropped.
  */
 export function graftComments(doc: Node, runs: AnnRun[]): void {
     const present = new Set<string>();
@@ -208,15 +200,16 @@ export function graftComments(doc: Node, runs: AnnRun[]): void {
         if (id === "" || run.text === "" || present.has(id)) {
             continue;
         }
-        const hits: Hit[] = [];
-        leaves.forEach((nod, leaf) => {
-            const flat = flatText(nod.content ?? []);
-            const leafId = attrStr(nod.attrs, "localId");
-            for (const offset of occurrences(flat, run.text)) {
-                hits.push({ leaf, leafId, flat, offset });
-            }
-        });
-        const hit = bestHit(hits, run);
+        const views: Leaf[] = leaves.map((nod, leaf) => ({
+            leaf,
+            leafId: attrStr(nod.attrs, "localId"),
+            flat: flatText(nod.content ?? []),
+        }));
+        const hit = findAnchor(
+            views,
+            run,
+            (v) => run.leafId !== "" && v.leafId === run.leafId,
+        );
         const target = hit === undefined ? undefined : leaves[hit.leaf];
         if (hit === undefined || target === undefined) {
             continue; // the commented text is gone — nowhere to anchor
@@ -224,11 +217,32 @@ export function graftComments(doc: Node, runs: AnnRun[]): void {
         target.content = applyAt(
             target.content ?? [],
             hit.offset,
-            hit.offset + run.text.length,
+            hit.end,
             run.mark,
         );
         present.add(id);
     }
+}
+
+/**
+ * annotationIds returns the id of every inline-comment annotation mark in doc.
+ * Comparing the live page's set with an outgoing body's names the comments a
+ * push would detach.
+ */
+export function annotationIds(doc: Node): Set<string> {
+    const ids = new Set<string>();
+    const walk = (nod: Node): void => {
+        for (const m of nod.marks ?? []) {
+            if (m.type === "annotation") {
+                ids.add(attrStr(m.attrs, "id"));
+            }
+        }
+        for (const child of nod.content ?? []) {
+            walk(child);
+        }
+    };
+    walk(doc);
+    return ids;
 }
 
 /** isLeaf reports whether nod holds inline text directly (a comment's host). */
@@ -247,6 +261,20 @@ function flatText(content: Node[]): string {
         .join("");
 }
 
+/**
+ * fold lower-cases s one code point at a time, keeping any code point whose
+ * lower case has a different length (such as `İ`) as is, so offsets into the
+ * folded string are offsets into s.
+ */
+function fold(s: string): string {
+    let out = "";
+    for (const ch of s) {
+        const low = ch.toLowerCase();
+        out += low.length === ch.length ? low : ch;
+    }
+    return out;
+}
+
 /** occurrences lists every offset at which target occurs in flat, overlaps included. */
 function occurrences(flat: string, target: string): number[] {
     const out: number[] = [];
@@ -260,16 +288,142 @@ function occurrences(flat: string, target: string): number[] {
     return out;
 }
 
-/** Hit is one candidate anchor: an occurrence of a run's text in a leaf. */
-interface Hit {
-    /** Document-order index of the leaf holding the occurrence. */
+/** Leaf is a block that can host a comment, as the anchor search sees it. */
+interface Leaf {
+    /** Document-order index of the leaf. */
     leaf: number;
     /** The leaf's localId; "" when it has none. */
     leafId: string;
-    /** The leaf's flat text. */
+    /** The leaf's flat text (see {@link flatText}). */
     flat: string;
-    /** Offset of the occurrence in flat. */
+}
+
+/** Hit is one candidate anchor: the span [offset, end) of a leaf's flat text. */
+interface Hit extends Leaf {
+    /** Offset of the span in flat. */
     offset: number;
+    /** Offset just past the span in flat. */
+    end: number;
+}
+
+/**
+ * NEAR_RATIO bounds a near-match: its edit distance from the commented text may
+ * be at most this fraction of that text's length, so a short anchor must match
+ * (almost) exactly and a sentence tolerates a word's change but not a rewrite.
+ */
+const NEAR_RATIO = 0.2;
+
+/**
+ * findAnchor locates where run's comment belongs among leaves. It searches the
+ * comment's own block first — the leaves `home` accepts — for the exact
+ * commented text, the same text ignoring case, and then the closest near-match
+ * (see {@link nearestSpan}); only when its own block has none of these does it
+ * look across all leaves for the exact text, then ignoring case. A near-match is
+ * never sought outside the own block, where a similar phrase is not evidence of
+ * the comment's spot. Among several occurrences the one best matching the run's
+ * original spot wins (see {@link bestHit}). It returns undefined when nothing
+ * matches.
+ */
+function findAnchor(
+    leaves: Leaf[],
+    run: AnnRun,
+    home: (leaf: Leaf) => boolean,
+): Hit | undefined {
+    const homes = leaves.filter(home);
+    const exact = (in_: Leaf[]) => bestHit(hitsOf(in_, run.text, same), run);
+    const folded = (in_: Leaf[]) =>
+        bestHit(hitsOf(in_, fold(run.text), fold), run);
+    return (
+        exact(homes) ??
+        folded(homes) ??
+        nearestSpan(homes, run) ??
+        exact(leaves) ??
+        folded(leaves)
+    );
+}
+
+/** same is the identity view of a leaf's flat text. */
+function same(s: string): string {
+    return s;
+}
+
+/** hitsOf lists every occurrence of target in each leaf's flat text as seen by view. */
+function hitsOf(
+    leaves: Leaf[],
+    target: string,
+    view: (s: string) => string,
+): Hit[] {
+    const hits: Hit[] = [];
+    for (const leaf of leaves) {
+        for (const offset of occurrences(view(leaf.flat), target)) {
+            hits.push({ ...leaf, offset, end: offset + target.length });
+        }
+    }
+    return hits;
+}
+
+/**
+ * nearestSpan finds, across leaves, the span of flat text closest to run's text
+ * by case-insensitive edit distance, accepting it only within
+ * {@link NEAR_RATIO} of the text's length. A span covering a non-text inline node
+ * is never a candidate, since a comment cannot live across one. Ties go to the
+ * span starting nearest the run's original offset. The search is the classic
+ * approximate substring match: the pattern must be consumed in full, but may
+ * start and end anywhere in the flat text.
+ */
+function nearestSpan(leaves: Leaf[], run: AnnRun): Hit | undefined {
+    const limit = Math.floor(run.text.length * NEAR_RATIO);
+    if (limit === 0) {
+        return undefined; // too short to tolerate any edit; exact already failed
+    }
+    const pat = fold(run.text);
+    let best: Hit | undefined;
+    let bestKey: number[] = [];
+    for (const leaf of leaves) {
+        const text = fold(leaf.flat);
+        // dist[j] / from[j]: the least edit distance of the pattern prefix so far
+        // against a span of text ending at j, and where that span starts.
+        let dist = Array.from({ length: text.length + 1 }, () => 0);
+        let from = Array.from({ length: text.length + 1 }, (_, j) => j);
+        for (let i = 1; i <= pat.length; i++) {
+            const nd = [i];
+            const nf = [0];
+            for (let j = 1; j <= text.length; j++) {
+                const sub =
+                    (dist[j - 1] ?? 0) + (pat[i - 1] === text[j - 1] ? 0 : 1);
+                const skipPat = (dist[j] ?? 0) + 1;
+                const skipText = (nd[j - 1] ?? 0) + 1;
+                if (sub <= skipPat && sub <= skipText) {
+                    nd.push(sub);
+                    nf.push(from[j - 1] ?? 0);
+                } else if (skipPat <= skipText) {
+                    nd.push(skipPat);
+                    nf.push(from[j] ?? 0);
+                } else {
+                    nd.push(skipText);
+                    nf.push(nf[j - 1] ?? 0);
+                }
+            }
+            dist = nd;
+            from = nf;
+        }
+        for (let end = 1; end <= text.length; end++) {
+            const d = dist[end] ?? 0;
+            const offset = from[end] ?? 0;
+            if (d > limit || offset >= end) {
+                continue;
+            }
+            if (leaf.flat.slice(offset, end).includes(OBJ)) {
+                continue;
+            }
+            const key = [-d, -Math.abs(offset - run.offset), end - offset];
+            if (best === undefined || outranks(key, bestKey)) {
+                best = { ...leaf, offset, end };
+                bestKey = key;
+            }
+        }
+    }
+    return best;
 }
 
 /**
@@ -285,7 +439,7 @@ function bestHit(hits: Hit[], run: AnnRun): Hit | undefined {
     let best: Hit | undefined;
     let bestKey: number[] = [];
     for (const hit of hits) {
-        const end = hit.offset + run.text.length;
+        const end = hit.end;
         const key = [
             run.leafId !== "" && hit.leafId === run.leafId ? 1 : 0,
             commonSuffix(hit.flat.slice(0, hit.offset), run.before) +

@@ -274,6 +274,8 @@ Every config-reading command accepts these flags after the command name; run
 --yes               Skip confirmation prompts (push, clean).
 --force             Repush pages whose ADF changed even if the Markdown did
                     not (push).
+--drop-comments     Push even when an edit detaches an open inline comment
+                    (push).
 --prune             Delete the orphaned asset files (gc).
 -h, --help          Print the command's help and exit.
 ```
@@ -425,8 +427,12 @@ comments in the Confluence UI. What a push *does* guarantee is that it never
 detaches an existing comment: a Confluence inline comment is an anchor mark the
 platform owns and the body can't otherwise express, so before each update the
 push re-grafts the live page's comment anchors onto the body. A comment survives
-as long as the text it highlights still exists; only rewriting the highlighted
-words themselves detaches it (there is then nowhere to anchor). Edit prose
+as long as the text it highlights still exists — anywhere it now occurs, the
+closest to its original spot wins — or survives lightly edited: a change of case,
+or a near-match within its own paragraph (a word changed, not a rewrite). When an
+edit rewrites the highlighted words beyond that, the push **refuses** the page
+and names each open comment it would detach; keep the text, or push with
+`--drop-comments` to detach them deliberately. Edit prose
 freely — just don't hand-edit the `[!comment]` metadata lines or the `[^cf-…]`
 anchors, which are `cfsync`-managed. Comments are not versioned with the page, so
 every pull re-fetches them; a note left comment-free by an earlier pull picks

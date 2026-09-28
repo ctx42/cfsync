@@ -13,6 +13,7 @@
 // upload lands in the second layer; page creation + create-and-restrict is M7.4.
 
 import {
+    annotationIds,
     collectDocAnnotationRuns,
     graftComments,
 } from "../adf/lens/annotate.ts";
@@ -262,6 +263,8 @@ export interface PusherDeps {
     flavor: Flavor;
     /** Re-derive every editable block from its Markdown even when unedited (push --force). Defaults to `false`. */
     force?: boolean;
+    /** Push even when the edit detaches an open inline comment (push --drop-comments). Defaults to `false`. */
+    dropComments?: boolean;
 }
 
 /**
@@ -742,6 +745,7 @@ export class Pusher {
                 docJSON,
                 this.d.flavor,
                 force,
+                this.d.dropComments ?? false,
                 bodyLine,
             );
             await this.d.client.updatePage(
@@ -1056,7 +1060,9 @@ async function readCache(
  * the remote still matches the note's base version it pushes `docJSON` at the next
  * version; when it has moved on it rebases via {@link mergeOntoLive}. Either way,
  * the live page's inline-comment anchors are grafted onto the outgoing body (see
- * {@link preserveLiveComments}), so a push never detaches a Confluence comment.
+ * {@link preserveLiveComments}), and unless `dropComments` is set the push is
+ * refused when it would still detach an open comment (see
+ * {@link refuseDetachedComments}).
  */
 async function pushDoc(
     client: ConfluenceClient,
@@ -1069,6 +1075,7 @@ async function pushDoc(
     docJSON: string,
     flavor: Flavor,
     force: boolean,
+    dropComments: boolean,
     bodyLine: number,
 ): Promise<{ docJSON: string; version: number }> {
     const data = await client.fetchPage(meta.pageId);
@@ -1088,10 +1095,52 @@ async function pushDoc(
                   force,
                   bodyLine,
               );
-    return {
-        docJSON: preserveLiveComments(pushed.docJSON, live),
-        version: pushed.version,
-    };
+    const out = preserveLiveComments(pushed.docJSON, live);
+    if (!dropComments) {
+        await refuseDetachedComments(client, meta.pageId, live, out);
+    }
+    return { docJSON: out, version: pushed.version };
+}
+
+/**
+ * refuseDetachedComments throws when the outgoing body would detach an open
+ * inline comment: one whose anchor mark is on the live page but on no text of
+ * `docJSON`, because the edit rewrote the commented words beyond a near-match.
+ * Confluence keeps such a thread open but anchorless, so it silently vanishes
+ * from the page; refusing names each comment so the edit can keep its text, or
+ * be pushed deliberately with `--drop-comments`. A resolved comment losing its
+ * anchor is no loss and passes. The comments are fetched only when some anchor
+ * is actually missing, so the common push costs no extra request.
+ */
+async function refuseDetachedComments(
+    client: ConfluenceClient,
+    pageId: string,
+    live: ADF,
+    docJSON: string,
+): Promise<void> {
+    const kept = annotationIds(JSON.parse(docJSON) as Node);
+    const lost = [...annotationIds(live.doc)].filter((id) => !kept.has(id));
+    if (lost.length === 0) {
+        return;
+    }
+    const { inline } = await client.fetchComments(pageId);
+    const detached = inline.filter(
+        (c) => c.resolution !== "resolved" && lost.includes(c.markerRef),
+    );
+    if (detached.length === 0) {
+        return;
+    }
+    const names = detached.map((c) => `"${clip(c.anchorText)}"`).join(", ");
+    throw new Error(
+        `push: the edit would detach ${detached.length} open Confluence ` +
+            `comment(s), whose highlighted text it rewrote: ${names}; keep that ` +
+            "text, or push with --drop-comments to detach them",
+    );
+}
+
+/** clip shortens s to at most 40 characters for an error message. */
+function clip(s: string): string {
+    return s.length <= 40 ? s : `${s.slice(0, 39)}…`;
 }
 
 /**

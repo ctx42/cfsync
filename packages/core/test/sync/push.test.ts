@@ -126,6 +126,7 @@ function pusherFor(
     mint = counterMint(),
     force = false,
     flavor: Flavor = obsidianFlavor,
+    dropComments = false,
 ): Pusher {
     const cfg = config();
     return new Pusher({
@@ -144,6 +145,7 @@ function pusherFor(
         links,
         flavor,
         force,
+        dropComments,
     });
 }
 
@@ -541,6 +543,133 @@ describe("Pusher.pushOne", () => {
 
         expect(changed).toBe(false);
         expect(stub.requests.some((r) => r.method === "PUT")).toBe(false);
+    });
+});
+
+describe("Pusher.pushOne with inline comments", () => {
+    // commented is a paragraph whose words "data type name" carry comment M1.
+    const commented = docOf({
+        type: "paragraph",
+        attrs: { localId: "p" },
+        content: [
+            { type: "text", text: "Change " },
+            {
+                type: "text",
+                text: "data type name",
+                marks: [{ type: "annotation", attrs: { id: "M1" } }],
+            },
+            { type: "text", text: " on the screen." },
+        ],
+    });
+    const v2 = "https://ex.atlassian.net/wiki/api/v2";
+    const adfQ = "?body-format=atlas_doc_format";
+
+    /** stubFor serves the commented live page, comment M1 with status, and a PUT. */
+    function stubFor(status: string): StubHttpClient {
+        return new StubHttpClient()
+            .on("GET", pageURL, { body: livePage(3, commented) })
+            .on("GET", `${v2}/pages/123/inline-comments${adfQ}`, {
+                body: JSON.stringify({
+                    results: [
+                        {
+                            id: "C1",
+                            resolutionStatus: status,
+                            properties: {
+                                inlineMarkerRef: "M1",
+                                inlineOriginalSelection: "data type name",
+                            },
+                            version: { authorId: "u", createdAt: "" },
+                            body: { atlas_doc_format: { value: "{}" } },
+                        },
+                    ],
+                    _links: {},
+                }),
+            })
+            .on("GET", `${v2}/inline-comments/C1/children${adfQ}`, {
+                body: JSON.stringify({ results: [], _links: {} }),
+            })
+            .on("GET", `${v2}/pages/123/footer-comments${adfQ}`, {
+                body: JSON.stringify({ results: [], _links: {} }),
+            })
+            .on("PUT", putURL, { status: 200 });
+    }
+
+    /** setup writes a note with body over the commented v3 baseline. */
+    async function setup(body: string): Promise<MemFS> {
+        const fs = new MemFS();
+        await fs.write("/vault/p.md", note(3, body));
+        await fs.write("/data/cache/p.v3.json", cacheWrapper(3, commented));
+        return fs;
+    }
+
+    it("keeps a comment whose words only changed case", async () => {
+        const fs = await setup("Change Data Type Name on the screen.");
+        const stub = stubFor("open");
+
+        const { changed } = await pusherFor(stub, fs).pushOne("/vault/p.md");
+
+        expect(changed).toBe(true);
+        const put = stub.requests.find((r) => r.method === "PUT");
+        expect(String(put?.body)).toContain('\\"id\\":\\"M1\\"');
+    });
+
+    it("refuses an edit that detaches an open comment, naming it", async () => {
+        const fs = await setup("Change the field label on the screen.");
+        const stub = stubFor("open");
+
+        const err = await pusherFor(stub, fs)
+            .pushOne("/vault/p.md")
+            .catch((e: unknown) => e as Error);
+
+        if (!(err instanceof Error)) throw err;
+        expect(err.message).toContain(
+            "would detach 1 open Confluence comment(s), whose highlighted " +
+                'text it rewrote: "data type name"',
+        );
+        expect(err.message).toContain("--drop-comments");
+        expect(stub.requests.some((r) => r.method === "PUT")).toBe(false);
+    });
+
+    it("pushes when the detached comment is resolved", async () => {
+        const fs = await setup("Change the field label on the screen.");
+        const stub = stubFor("resolved");
+
+        const { changed } = await pusherFor(stub, fs).pushOne("/vault/p.md");
+
+        expect(changed).toBe(true);
+        expect(stub.requests.some((r) => r.method === "PUT")).toBe(true);
+    });
+
+    it("pushes a detaching edit with dropComments", async () => {
+        const fs = await setup("Change the field label on the screen.");
+        const stub = stubFor("open");
+        const pusher = pusherFor(
+            stub,
+            fs,
+            null,
+            counterMint(),
+            false,
+            obsidianFlavor,
+            true,
+        );
+
+        const { changed } = await pusher.pushOne("/vault/p.md");
+
+        expect(changed).toBe(true);
+        const put = stub.requests.find((r) => r.method === "PUT");
+        expect(String(put?.body)).toContain("the field label");
+        expect(String(put?.body)).not.toContain("M1");
+    });
+
+    it("skips the comment fetch when no anchor is lost", async () => {
+        const fs = await setup("Change data type name on the big screen.");
+        const stub = stubFor("open");
+
+        await pusherFor(stub, fs).pushOne("/vault/p.md");
+
+        expect(stub.requests.some((r) => r.url.includes("comments"))).toBe(
+            false,
+        );
     });
 });
 

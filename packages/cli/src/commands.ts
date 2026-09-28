@@ -169,6 +169,7 @@ export async function runPush(
     selected: string,
     confirm: ConfirmCreates,
     force: boolean,
+    dropComments: boolean,
 ): Promise<CommandResult> {
     const links = await loadLinkIndex(
         d.fs,
@@ -209,6 +210,7 @@ export async function runPush(
         links,
         flavor: resolveFlavor(d.config.flavor),
         force,
+        dropComments,
     });
     const outcome = await pusher.pushDests(dests, plan);
 

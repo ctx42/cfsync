@@ -122,6 +122,7 @@ interface ConfigFlags {
     yes: boolean;
     prune: boolean;
     force: boolean;
+    dropComments: boolean;
     page: string;
 }
 
@@ -219,6 +220,7 @@ function runCommand(
                 flags.page,
                 (cands) => confirmCreates(cands, promptOpts),
                 flags.force,
+                flags.dropComments,
             );
         case "status":
             return runStatus(deps);
@@ -256,6 +258,7 @@ function parseFlags(
     }
     if (cmd === "push") {
         options["force"] = { type: "boolean" };
+        options["drop-comments"] = { type: "boolean" };
     }
     if (cmd === "gc") {
         options["prune"] = { type: "boolean" };
@@ -275,6 +278,7 @@ function parseFlags(
             yes?: boolean;
             prune?: boolean;
             force?: boolean;
+            "drop-comments"?: boolean;
             help?: boolean;
         };
         if (v.help === true) {
@@ -293,6 +297,7 @@ function parseFlags(
             yes: v.yes === true,
             prune: v.prune === true,
             force: cmd === "push" ? v.force === true : false,
+            dropComments: cmd === "push" ? v["drop-comments"] === true : false,
             page: withPage ? (positionals[0] ?? "") : "",
         };
     } catch (err) {
@@ -392,7 +397,8 @@ const COMMAND_USAGE: Record<ConfigCommand, string> = {
         "\nFlags:\n" +
         FLAGS_COMMON +
         "  --yes               Create new pages without asking.\n" +
-        "  --force             Repush pages whose ADF changed even if the Markdown did not.\n",
+        "  --force             Repush pages whose ADF changed even if the Markdown did not.\n" +
+        "  --drop-comments     Push even when an edit detaches an open inline comment.\n",
     status:
         "cfsync status — list managed pages with newer versions on Confluence.\n" +
         "\nUsage:\n  cfsync status [flags]\n" +
