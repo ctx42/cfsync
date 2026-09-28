@@ -1103,9 +1103,8 @@ async function pushDoc(
  * text ({@link reanchorAnnotations}), but its source is the possibly-stale local
  * baseline; grafting from the live page (the authoritative source) closes the
  * gap, and a comment whose anchor is already present is left untouched. A comment
- * whose commented text the edit rewrote — or made ambiguous — is still the one
- * unavoidable loss (see {@link graftComments}). With no live comments this is a
- * cheap no-op.
+ * whose commented text the edit rewrote is still the one unavoidable loss (see
+ * {@link graftComments}). With no live comments this is a cheap no-op.
  */
 function preserveLiveComments(docJSON: string, live: ADF): string {
     const runs = collectDocAnnotationRuns(live.doc);

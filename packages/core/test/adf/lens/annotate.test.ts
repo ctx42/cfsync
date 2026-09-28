@@ -6,8 +6,9 @@
 // Markdown cannot express the comment, so a rendered body drops it; without
 // re-anchoring an edited paragraph would silently detach the comment. These
 // tests state the contract: the comment survives when its commented text still
-// appears in the edit, and is dropped only when the edit changed that text away
-// or made it ambiguous. The render emits nothing for an annotation, so a
+// appears in the edit — at the occurrence best matching its original spot when
+// the text now occurs more than once — and is dropped only when the edit changed
+// that text away. The render emits nothing for an annotation, so a
 // re-anchor never changes the body and the PutGet law still holds.
 
 import { describe, expect, it } from "vitest";
@@ -113,19 +114,21 @@ describe("annotation re-anchoring", () => {
         expect(commentText(have, "c2")).toBe("the bold"); // comment re-anchored
     });
 
-    it("drops rather than guesses when the commented text is ambiguous", () => {
+    it("keeps the comment on its original spot when the text is repeated", () => {
         const twice = `{ "adf": { "type": "doc", "content": [
            { "type": "paragraph", "attrs": { "localId": "p" }, "content": [
               { "type": "text", "text": "a ", "marks": [
                  { "type": "annotation", "attrs": { "id": "c3" } } ] },
               { "type": "text", "text": "and a here." } ] } ] } }`;
         const base = newADF(twice);
-        // The comment covers the leading "a "; after the edit "a " occurs twice,
-        // so there is no single anchor and the comment is dropped, not misplaced.
+        // The comment covers the leading "a ", which occurs twice after the
+        // edit; the occurrence whose surroundings still match is the original.
         const body = renderBody(base).replace("and a here", "and a there");
         const have = put(base, body, null, null, null);
         expect(renderBody(have)).toBe(body);
-        expect(comments(have)).toHaveLength(0);
+        expect(comments(have)).toEqual([{ id: "c3", text: "a " }]);
+        const first = have.doc.content?.[0]?.content?.[0];
+        expect(first?.text).toBe("a "); // the leading run, not the later one
     });
 });
 
@@ -168,16 +171,79 @@ describe("graftComments: preserving live comments on push", () => {
         expect(comments({ ...newADF(edited), doc })).toHaveLength(0);
     });
 
-    it("drops a comment whose text is ambiguous across two blocks", () => {
+    /** annotatedBlocks lists the index of each top-level block carrying id. */
+    function annotatedBlocks(adf: ADF, id: string): number[] {
+        const out: number[] = [];
+        (adf.doc.content ?? []).forEach((blk, i) => {
+            const hit = (blk.content ?? []).some((n) =>
+                (n.marks ?? []).some(
+                    (m) => m.type === "annotation" && m.attrs?.["id"] === id,
+                ),
+            );
+            if (hit) {
+                out.push(i);
+            }
+        });
+        return out;
+    }
+
+    it("keeps a comment whose text now also occurs in another block", () => {
         const live = newADF(commented);
-        // "data type name" now appears in two paragraphs — no single anchor.
+        // "data type name" now appears in a new first paragraph too; the
+        // comment stays on its original block, found by its localId.
         const twice = `{ "adf": { "type": "doc", "content": [
-           { "type": "paragraph", "content": [
+           { "type": "paragraph", "attrs": { "localId": "new" }, "content": [
               { "type": "text", "text": "Change data type name here." } ] },
-           { "type": "paragraph", "content": [
-              { "type": "text", "text": "And data type name there." } ] } ] } }`;
+           { "type": "paragraph", "attrs": { "localId": "p" }, "content": [
+              { "type": "text", "text": "Change data type name on the screen." }
+           ] } ] } }`;
         const doc = newADF(twice).doc;
         graftComments(doc, collectDocAnnotationRuns(live.doc));
-        expect(comments({ ...newADF(twice), doc })).toHaveLength(0);
+        const have: ADF = { ...newADF(twice), doc };
+        expect(comments(have)).toEqual([{ id: "c1", text: "data type name" }]);
+        expect(annotatedBlocks(have, "c1")).toEqual([1]);
+    });
+
+    it("picks the occurrence with matching surroundings without localIds", () => {
+        const live = newADF(`{ "adf": { "type": "doc", "content": [
+           { "type": "paragraph", "content": [
+              { "type": "text", "text": "Intro." } ] },
+           { "type": "paragraph", "content": [
+              { "type": "text", "text": "Change " },
+              { "type": "text", "text": "data type name", "marks": [
+                 { "type": "annotation", "attrs": { "id": "c1" } } ] },
+              { "type": "text", "text": " on the screen." } ] } ] } }`);
+        // The commented block moved below a new block with the same words;
+        // its unchanged surroundings, not the block order, identify it.
+        const moved = `{ "adf": { "type": "doc", "content": [
+           { "type": "paragraph", "content": [
+              { "type": "text", "text": "Intro." } ] },
+           { "type": "paragraph", "content": [
+              { "type": "text", "text": "Rename data type name first." } ] },
+           { "type": "paragraph", "content": [
+              { "type": "text", "text": "Change data type name on the screen." }
+           ] } ] } }`;
+        const doc = newADF(moved).doc;
+        graftComments(doc, collectDocAnnotationRuns(live.doc));
+        const have: ADF = { ...newADF(moved), doc };
+        expect(comments(have)).toEqual([{ id: "c1", text: "data type name" }]);
+        expect(annotatedBlocks(have, "c1")).toEqual([2]);
+    });
+
+    it("anchors a repeated comment text within one block by its offset", () => {
+        const live = newADF(`{ "adf": { "type": "doc", "content": [
+           { "type": "paragraph", "attrs": { "localId": "p" }, "content": [
+              { "type": "text", "text": "x and " },
+              { "type": "text", "text": "x", "marks": [
+                 { "type": "annotation", "attrs": { "id": "c4" } } ] },
+              { "type": "text", "text": " end" } ] } ] } }`);
+        const plainX = `{ "adf": { "type": "doc", "content": [
+           { "type": "paragraph", "attrs": { "localId": "p" }, "content": [
+              { "type": "text", "text": "x and x end" } ] } ] } }`;
+        const doc = newADF(plainX).doc;
+        graftComments(doc, collectDocAnnotationRuns(live.doc));
+        const para = doc.content?.[0]?.content ?? [];
+        expect(para.map((n) => n.text)).toEqual(["x and ", "x", " end"]);
+        expect(para[1]?.marks?.[0]?.attrs?.["id"]).toBe("c4");
     });
 });
