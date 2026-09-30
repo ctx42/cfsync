@@ -12,8 +12,9 @@
 // costs a comment. When it occurs nowhere, the match loosens in two steps —
 // ignoring case, then the closest near-match within the comment's own block —
 // so a light edit to the commented words keeps the comment. Only a comment whose
-// words the edit rewrote beyond that is dropped, and the push refuses to drop an
-// open one unless told to (see the sync layer). The render emits no delimiter
+// words the edit rewrote beyond that is dropped by the re-anchor; the push then
+// moves an open one onto the nearest remaining text rather than detach it (see
+// relocateComments and the sync layer). The render emits no delimiter
 // for an annotation, so re-anchoring never changes the rebuilt body and the
 // PutGet law still holds.
 
@@ -49,6 +50,11 @@ interface AnnRun {
     leaf: number;
     /** The localId of the run's leaf; "" when it has none or is unknown. */
     leafId: string;
+    /**
+     * The localIds of the other leaves of the run's document, nearest first (the
+     * preceding one on a tie); empty outside {@link collectDocAnnotationRuns}.
+     */
+    near: string[];
 }
 
 /**
@@ -83,6 +89,7 @@ export function collectAnnotationRuns(content: Node[]): AnnRun[] {
                         after: "",
                         leaf: 0,
                         leafId: "",
+                        near: [],
                     };
                     open.set(id, run);
                     runs.push(run);
@@ -135,26 +142,36 @@ export function reanchorAnnotations(content: Node[], runs: AnnRun[]): Node[] {
  * its direct text children (see {@link collectAnnotationRuns}), which is a no-op
  * on a container's leaf children, so every run is gathered exactly once. Each run
  * records its leaf's document-order index and localId, the same leaf numbering
- * {@link graftComments} uses. It is the input to graftComments, which re-anchors
- * the live page's comments onto a rebuilt push body.
+ * {@link graftComments} uses, and the localIds of the leaves around it. It is
+ * the input to graftComments, which re-anchors the live page's comments onto a
+ * rebuilt push body, and to {@link relocateComments}.
  */
 export function collectDocAnnotationRuns(doc: Node): AnnRun[] {
     const runs: AnnRun[] = [];
-    let leaf = 0;
+    const ids: string[] = [];
     const walk = (nod: Node): void => {
         if (isLeaf(nod)) {
             for (const run of collectAnnotationRuns(nod.content ?? [])) {
-                run.leaf = leaf;
+                run.leaf = ids.length;
                 run.leafId = attrStr(nod.attrs, "localId");
                 runs.push(run);
             }
-            leaf++;
+            ids.push(attrStr(nod.attrs, "localId"));
         }
         for (const child of nod.content ?? []) {
             walk(child);
         }
     };
     walk(doc);
+    for (const run of runs) {
+        for (let d = 1; d < ids.length; d++) {
+            for (const id of [ids[run.leaf - d], ids[run.leaf + d]]) {
+                if (id !== undefined && id !== "") {
+                    run.near.push(id);
+                }
+            }
+        }
+    }
     return runs;
 }
 
@@ -222,6 +239,85 @@ export function graftComments(doc: Node, runs: AnnRun[]): void {
         );
         present.add(id);
     }
+}
+
+/**
+ * relocateComments moves each comment in `ids` that `doc` no longer anchors
+ * onto the nearest text that remains, in place, and returns the ids it moved.
+ * It is the last resort for an open comment whose highlighted words the edit
+ * rewrote beyond what {@link graftComments} can find: detaching it would make
+ * it vanish from the page, while moving it keeps the thread visible next to
+ * where it was asked. The comment's own block, found by its localId, is tried
+ * first, then the other blocks of the live page nearest first (see
+ * {@link AnnRun.near}); the first one still in `doc` with text to hold a
+ * comment gets its longest text span (see {@link wholeSpan}). A code block
+ * never does, as Confluence allows no comment there. A comment whose runs name
+ * no surviving block is left detached and not returned.
+ */
+export function relocateComments(
+    doc: Node,
+    runs: AnnRun[],
+    ids: ReadonlySet<string>,
+): string[] {
+    const present = annotationIds(doc);
+    const byId = new Map<string, Node>();
+    const scan = (nod: Node): void => {
+        const id = attrStr(nod.attrs, "localId");
+        if (isLeaf(nod) && nod.type !== "codeBlock" && id !== "") {
+            byId.set(id, nod);
+        }
+        for (const child of nod.content ?? []) {
+            scan(child);
+        }
+    };
+    scan(doc);
+
+    const moved: string[] = [];
+    for (const run of runs) {
+        const id = attrStr(run.mark.attrs, "id");
+        if (!ids.has(id) || present.has(id)) {
+            continue;
+        }
+        for (const leafId of [run.leafId, ...run.near]) {
+            const target = byId.get(leafId);
+            const span =
+                target === undefined
+                    ? undefined
+                    : wholeSpan(flatText(target.content ?? []));
+            if (target === undefined || span === undefined) {
+                continue;
+            }
+            target.content = applyAt(
+                target.content ?? [],
+                span[0],
+                span[1],
+                run.mark,
+            );
+            present.add(id);
+            moved.push(id);
+            break;
+        }
+    }
+    return moved;
+}
+
+/**
+ * wholeSpan returns the [start, end) of the longest stretch of flat text
+ * between non-text inline nodes, trimmed of surrounding whitespace, or
+ * undefined when the leaf has no text to hold a comment.
+ */
+function wholeSpan(flat: string): [number, number] | undefined {
+    let best: [number, number] | undefined;
+    let start = 0;
+    for (const part of flat.split(OBJ)) {
+        const lead = part.length - part.trimStart().length;
+        const len = part.trim().length;
+        if (len > 0 && (best === undefined || len > best[1] - best[0])) {
+            best = [start + lead, start + lead + len];
+        }
+        start += part.length + OBJ.length;
+    }
+    return best;
 }
 
 /**

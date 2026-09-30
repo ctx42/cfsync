@@ -398,7 +398,7 @@ const COMMAND_USAGE: Record<ConfigCommand, string> = {
         FLAGS_COMMON +
         "  --yes               Create new pages without asking.\n" +
         "  --force             Repush pages whose ADF changed even if the Markdown did not.\n" +
-        "  --drop-comments     Push even when an edit detaches an open inline comment.\n",
+        "  --drop-comments     Detach open inline comments an edit rewrote, not move them.\n",
     status:
         "cfsync status — list managed pages with newer versions on Confluence.\n" +
         "\nUsage:\n  cfsync status [flags]\n" +

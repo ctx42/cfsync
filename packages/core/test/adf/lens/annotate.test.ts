@@ -15,6 +15,7 @@ import { describe, expect, it } from "vitest";
 import {
     collectDocAnnotationRuns,
     graftComments,
+    relocateComments,
 } from "../../../src/adf/lens/annotate.ts";
 import { put } from "../../../src/adf/lens/reconstruct.ts";
 import { marshallMarkdownMapped } from "../../../src/index.ts";
@@ -297,5 +298,92 @@ describe("graftComments: preserving live comments on push", () => {
         const para = doc.content?.[0]?.content ?? [];
         expect(para.map((n) => n.text)).toEqual(["x and ", "x", " end"]);
         expect(para[1]?.marks?.[0]?.attrs?.["id"]).toBe("c4");
+    });
+});
+
+describe("relocateComments: moving a rewritten comment", () => {
+    // live holds comment c1 on the middle of three paragraphs.
+    const live = newADF(`{ "adf": { "type": "doc", "content": [
+       { "type": "paragraph", "attrs": { "localId": "a" }, "content": [
+          { "type": "text", "text": "Before." } ] },
+       { "type": "paragraph", "attrs": { "localId": "p" }, "content": [
+          { "type": "text", "text": "Change " },
+          { "type": "text", "text": "data type name", "marks": [
+             { "type": "annotation", "attrs": { "id": "c1" } } ] },
+          { "type": "text", "text": " on the screen." } ] },
+       { "type": "paragraph", "attrs": { "localId": "b" }, "content": [
+          { "type": "text", "text": "After." } ] } ] } }`);
+    const runs = collectDocAnnotationRuns(live.doc);
+
+    /** relocate parses src, relocates c1 onto it, and returns the result. */
+    function relocate(src: string, ids = ["c1"]) {
+        const doc = newADF(src).doc;
+        const moved = relocateComments(doc, runs, new Set(ids));
+        return { moved, have: { ...newADF(src), doc } };
+    }
+
+    it("moves the comment onto its own rewritten block", () => {
+        const { moved, have } = relocate(`{ "adf": { "type": "doc", "content": [
+           { "type": "paragraph", "attrs": { "localId": "p" }, "content": [
+              { "type": "text", "text": "Rename the field label." } ] } ] } }`);
+
+        expect(moved).toEqual(["c1"]);
+        expect(comments(have)).toEqual([
+            { id: "c1", text: "Rename the field label." },
+        ]);
+    });
+
+    it("moves the comment to the preceding block when its own is gone", () => {
+        const { moved, have } = relocate(`{ "adf": { "type": "doc", "content": [
+           { "type": "paragraph", "attrs": { "localId": "a" }, "content": [
+              { "type": "text", "text": "Before." } ] },
+           { "type": "paragraph", "attrs": { "localId": "b" }, "content": [
+              { "type": "text", "text": "After." } ] } ] } }`);
+
+        expect(moved).toEqual(["c1"]);
+        expect(comments(have)).toEqual([{ id: "c1", text: "Before." }]);
+    });
+
+    it("skips a code block for the next nearest block", () => {
+        const { have } = relocate(`{ "adf": { "type": "doc", "content": [
+           { "type": "codeBlock", "attrs": { "localId": "a" }, "content": [
+              { "type": "text", "text": "x := 1" } ] },
+           { "type": "paragraph", "attrs": { "localId": "b" }, "content": [
+              { "type": "text", "text": "After." } ] } ] } }`);
+
+        expect(comments(have)).toEqual([{ id: "c1", text: "After." }]);
+    });
+
+    it("anchors the longest text beside a non-text inline node", () => {
+        const { have } = relocate(`{ "adf": { "type": "doc", "content": [
+           { "type": "paragraph", "attrs": { "localId": "p" }, "content": [
+              { "type": "text", "text": "Ask " },
+              { "type": "mention", "attrs": { "id": "u" } },
+              { "type": "text", "text": " about the field label." } ] } ] } }`);
+
+        expect(comments(have)).toEqual([
+            { id: "c1", text: "about the field label." },
+        ]);
+    });
+
+    it("leaves a comment detached when no block survives", () => {
+        const { moved, have } = relocate(`{ "adf": { "type": "doc", "content": [
+           { "type": "paragraph", "content": [
+              { "type": "text", "text": "New text." } ] } ] } }`);
+
+        expect(moved).toEqual([]);
+        expect(comments(have)).toHaveLength(0);
+    });
+
+    it("moves only the comments asked for", () => {
+        const { moved, have } = relocate(
+            `{ "adf": { "type": "doc", "content": [
+               { "type": "paragraph", "attrs": { "localId": "p" }, "content": [
+                  { "type": "text", "text": "Rewritten." } ] } ] } }`,
+            [],
+        );
+
+        expect(moved).toEqual([]);
+        expect(comments(have)).toHaveLength(0);
     });
 });

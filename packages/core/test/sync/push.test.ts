@@ -613,8 +613,35 @@ describe("Pusher.pushOne with inline comments", () => {
         expect(String(put?.body)).toContain('\\"id\\":\\"M1\\"');
     });
 
-    it("refuses an edit that detaches an open comment, naming it", async () => {
+    it("moves an open comment whose text the edit rewrote, naming it", async () => {
         const fs = await setup("Change the field label on the screen.");
+        const stub = stubFor("open");
+
+        const { changed, warning } = await pusherFor(stub, fs).pushOne(
+            "/vault/p.md",
+        );
+
+        expect(changed).toBe(true);
+        expect(warning).toBe(
+            "moved 1 open Confluence comment(s), whose highlighted text the " +
+                'edit rewrote, to the nearest remaining text: "data type name"',
+        );
+        const put = stub.requests.find((r) => r.method === "PUT");
+        const body = JSON.parse(String(put?.body)) as {
+            body: { value: string };
+        };
+        const para = JSON.parse(body.body.value).content[0];
+        expect(para.content).toEqual([
+            {
+                type: "text",
+                text: "Change the field label on the screen.",
+                marks: [{ type: "annotation", attrs: { id: "M1" } }],
+            },
+        ]);
+    });
+
+    it("refuses when an open comment has no text left to move to", async () => {
+        const fs = await setup("```\ncode\n```");
         const stub = stubFor("open");
 
         const err = await pusherFor(stub, fs)
@@ -623,8 +650,8 @@ describe("Pusher.pushOne with inline comments", () => {
 
         if (!(err instanceof Error)) throw err;
         expect(err.message).toContain(
-            "would detach 1 open Confluence comment(s), whose highlighted " +
-                'text it rewrote: "data type name"',
+            "would detach 1 open Confluence comment(s), with no text left " +
+                'to move them to: "data type name"',
         );
         expect(err.message).toContain("--drop-comments");
         expect(stub.requests.some((r) => r.method === "PUT")).toBe(false);

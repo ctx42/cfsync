@@ -16,6 +16,7 @@ import {
     annotationIds,
     collectDocAnnotationRuns,
     graftComments,
+    relocateComments,
 } from "../adf/lens/annotate.ts";
 import { MergeConflictError, merge3Links } from "../adf/lens/merge.ts";
 import type { NewImage } from "../adf/lens/reconstruct.ts";
@@ -766,7 +767,7 @@ export class Pusher {
             const pushedImages = uploaded;
             uploaded = [];
             meta.pageVersion = pushed.version;
-            let warning = "";
+            let warning = pushed.warning;
             try {
                 await stampPushedVersion(this.d.fs, dest, pushed.version);
                 await canonicalizeImages(
@@ -790,9 +791,10 @@ export class Pusher {
                     this.d.flavor,
                 );
             } catch (err) {
-                warning =
+                const failed =
                     `pushed v${pushed.version} but refreshing the local ` +
                     `copy failed: ${message(err)}`;
+                warning = warning === "" ? failed : `${warning}; ${failed}`;
             }
             return {
                 changed: true,
@@ -1060,9 +1062,9 @@ async function readCache(
  * the remote still matches the note's base version it pushes `docJSON` at the next
  * version; when it has moved on it rebases via {@link mergeOntoLive}. Either way,
  * the live page's inline-comment anchors are grafted onto the outgoing body (see
- * {@link preserveLiveComments}), and unless `dropComments` is set the push is
- * refused when it would still detach an open comment (see
- * {@link refuseDetachedComments}).
+ * {@link preserveLiveComments}), and unless `dropComments` is set an open
+ * comment the edit would still detach is moved to the nearest remaining text,
+ * which the returned warning names (see {@link keepDetachedComments}).
  */
 async function pushDoc(
     client: ConfluenceClient,
@@ -1077,7 +1079,7 @@ async function pushDoc(
     force: boolean,
     dropComments: boolean,
     bodyLine: number,
-): Promise<{ docJSON: string; version: number }> {
+): Promise<{ docJSON: string; version: number; warning: string }> {
     const data = await client.fetchPage(meta.pageId);
     const live = liveADF(data);
     const pushed =
@@ -1096,46 +1098,69 @@ async function pushDoc(
                   bodyLine,
               );
     const out = preserveLiveComments(pushed.docJSON, live);
-    if (!dropComments) {
-        await refuseDetachedComments(client, meta.pageId, live, out);
+    if (dropComments) {
+        return { docJSON: out, version: pushed.version, warning: "" };
     }
-    return { docJSON: out, version: pushed.version };
+    const kept = await keepDetachedComments(client, meta.pageId, live, out);
+    return { ...kept, version: pushed.version };
 }
 
 /**
- * refuseDetachedComments throws when the outgoing body would detach an open
- * inline comment: one whose anchor mark is on the live page but on no text of
+ * keepDetachedComments keeps every open inline comment the outgoing body would
+ * detach: one whose anchor mark is on the live page but on no text of
  * `docJSON`, because the edit rewrote the commented words beyond a near-match.
  * Confluence keeps such a thread open but anchorless, so it silently vanishes
- * from the page; refusing names each comment so the edit can keep its text, or
- * be pushed deliberately with `--drop-comments`. A resolved comment losing its
- * anchor is no loss and passes. The comments are fetched only when some anchor
- * is actually missing, so the common push costs no extra request.
+ * from the page; instead each one is moved onto the nearest remaining text (see
+ * {@link relocateComments}) and the returned warning names it, so the push goes
+ * on and the thread stays visible close to where it was asked. A resolved
+ * comment losing its anchor is no loss and is left detached. It throws only
+ * when an open comment has no block left to move to. The comments are fetched
+ * only when some anchor is actually missing, so the common push costs no extra
+ * request.
  */
-async function refuseDetachedComments(
+async function keepDetachedComments(
     client: ConfluenceClient,
     pageId: string,
     live: ADF,
     docJSON: string,
-): Promise<void> {
-    const kept = annotationIds(JSON.parse(docJSON) as Node);
+): Promise<{ docJSON: string; warning: string }> {
+    const doc = JSON.parse(docJSON) as Node;
+    const kept = annotationIds(doc);
     const lost = [...annotationIds(live.doc)].filter((id) => !kept.has(id));
     if (lost.length === 0) {
-        return;
+        return { docJSON, warning: "" };
     }
     const { inline } = await client.fetchComments(pageId);
     const detached = inline.filter(
         (c) => c.resolution !== "resolved" && lost.includes(c.markerRef),
     );
     if (detached.length === 0) {
-        return;
+        return { docJSON, warning: "" };
     }
-    const names = detached.map((c) => `"${clip(c.anchorText)}"`).join(", ");
-    throw new Error(
-        `push: the edit would detach ${detached.length} open Confluence ` +
-            `comment(s), whose highlighted text it rewrote: ${names}; keep that ` +
-            "text, or push with --drop-comments to detach them",
+    const moved = new Set(
+        relocateComments(
+            doc,
+            collectDocAnnotationRuns(live.doc),
+            new Set(detached.map((c) => c.markerRef)),
+        ),
     );
+    const names = (cs: typeof detached) =>
+        cs.map((c) => `"${clip(c.anchorText)}"`).join(", ");
+    const stuck = detached.filter((c) => !moved.has(c.markerRef));
+    if (stuck.length > 0) {
+        throw new Error(
+            `push: the edit would detach ${stuck.length} open Confluence ` +
+                `comment(s), with no text left to move them to: ` +
+                `${names(stuck)}; push with --drop-comments to detach them`,
+        );
+    }
+    return {
+        docJSON: JSON.stringify(doc),
+        warning:
+            `moved ${detached.length} open Confluence comment(s), whose ` +
+            `highlighted text the edit rewrote, to the nearest remaining ` +
+            `text: ${names(detached)}`,
+    };
 }
 
 /** clip shortens s to at most 40 characters for an error message. */
