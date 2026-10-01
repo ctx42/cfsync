@@ -8,15 +8,24 @@
 // DOM shell.
 
 import {
+    ACTION_LABELS,
+    type Choice,
     isClean,
+    overwrites,
     type PageAction,
     type PreflightEntry,
+    type RowAction,
+    rowActions,
     type StatusReport,
+    type StatusRow,
+    statusRows,
 } from "@cfsync/core";
 import { ItemView, Notice, setIcon, TFile, type WorkspaceLeaf } from "obsidian";
 import type cfsyncPlugin from "../main.ts";
 import { buildRuntime, type PluginRuntime } from "../runtime.ts";
+import { confirmModal } from "./confirm.ts";
 import {
+    applyStatus,
     markNever,
     preflight,
     pullNote,
@@ -260,6 +269,10 @@ export class cfsyncView extends ItemView {
                     "unchanged",
                 );
                 this.badge(foot, "err", "x", state.counts.err, "failed");
+            } else if (state.verb === "applying") {
+                // An applied status: applied / failed.
+                this.badge(foot, "ok", "check", state.counts.ok, "applied");
+                this.badge(foot, "err", "x", state.counts.err, "failed");
             } else {
                 // A push: pushed / unchanged / refused.
                 this.badge(foot, "ok", "check", state.counts.ok, "pushed");
@@ -495,7 +508,11 @@ export class cfsyncView extends ItemView {
 
     /** renderStatus draws a status report as collapsible sections, read-only;
      * the "show ignored" toggle redraws it with the ignored notes listed. */
-    private renderStatus(report: StatusReport, showIgnored: boolean): void {
+    private renderStatus(
+        report: StatusReport,
+        showIgnored: boolean,
+        picked: Map<string, RowAction> = new Map(),
+    ): void {
         const root = this.contentEl;
         root.empty();
         root.addClass("cfsync-panel");
@@ -517,11 +534,19 @@ export class cfsyncView extends ItemView {
         const toggle = root.createEl("label", { cls: "cfsync-status-toggle" });
         const box = toggle.createEl("input", { type: "checkbox" });
         box.checked = showIgnored;
-        box.onchange = () => this.renderStatus(report, box.checked);
+        box.onchange = () => this.renderStatus(report, box.checked, picked);
         toggle.createSpan({
             text: ` Show ignored (${report.ignored.length})`,
         });
 
+        // Each actionable row gets a dropdown of its actions, starting at skip;
+        // the choices survive the show-ignored toggle's redraw.
+        const rows = new Map(
+            statusRows(report, this.plugin.settings.syncRoot).map((r) => [
+                r.name,
+                r,
+            ]),
+        );
         for (const s of sections) {
             const det = root.createEl("details", { cls: "cfsync-status" });
             det.open = true;
@@ -536,10 +561,24 @@ export class cfsyncView extends ItemView {
                 if (l.detail !== "") {
                     r.createSpan({ cls: "cfsync-prow-note", text: l.detail });
                 }
+                const row =
+                    s.title === "Could not check"
+                        ? undefined
+                        : rows.get(l.name);
+                if (row !== undefined) {
+                    this.actionSelect(r, row, picked);
+                }
             }
         }
 
         const actions = root.createDiv({ cls: "cfsync-preview-actions" });
+        if (rows.size > 0) {
+            const apply = actions.createEl("button", {
+                cls: "cfsync-action cfsync-push",
+                text: "Apply",
+            });
+            apply.onclick = () => void this.applyChoices(rows, picked);
+        }
         if (sections.length > 0) {
             const copy = actions.createEl("button", {
                 cls: "cfsync-action",
@@ -558,6 +597,68 @@ export class cfsyncView extends ItemView {
             text: "Back",
         });
         back.onclick = () => this.render(null);
+    }
+
+    /** actionSelect appends a row's action dropdown, recording the choice. */
+    private actionSelect(
+        el: HTMLElement,
+        row: StatusRow,
+        picked: Map<string, RowAction>,
+    ): void {
+        const sel = el.createEl("select", { cls: "cfsync-row-action" });
+        for (const a of rowActions(row.kind)) {
+            sel.createEl("option", { value: a, text: ACTION_LABELS[a] });
+        }
+        sel.value = picked.get(row.dest) ?? "skip";
+        sel.onchange = () => {
+            picked.set(row.dest, sel.value as RowAction);
+        };
+    }
+
+    /** applyChoices confirms any overwrite once, then applies the chosen
+     * actions as one run whose results show like a pull or push. */
+    private async applyChoices(
+        rows: Map<string, StatusRow>,
+        picked: Map<string, RowAction>,
+    ): Promise<void> {
+        const choices: Choice[] = [...rows.values()].map((row) => ({
+            row,
+            action: picked.get(row.dest) ?? "skip",
+        }));
+        if (choices.every((c) => c.action === "skip")) {
+            new Notice("cfsync: nothing to apply — every row is set to skip");
+            return;
+        }
+        const lose = overwrites(choices).map((r) => r.name);
+        if (
+            lose.length > 0 &&
+            !(await confirmModal(
+                this.app,
+                "Overwrite from Confluence?",
+                "The local edits in these notes will be discarded:",
+                lose,
+                "Overwrite",
+            ))
+        ) {
+            return;
+        }
+        await this.run("applying", async (rt, reporter) => {
+            reporter.discovered(
+                choices.filter((c) => c.action !== "skip").length,
+            );
+            const results = await applyStatus(rt, reporter, choices);
+            let ok = 0;
+            for (const r of results) {
+                const line = `${ACTION_LABELS[r.action]} ${r.name} (${r.detail})`;
+                if (r.ok) {
+                    ok++;
+                    reporter.log(line);
+                } else {
+                    reporter.fail(line);
+                }
+            }
+            reporter.setCounts({ ok, warn: 0, err: results.length - ok });
+        });
     }
 
     /** refusePending blocks a new run while a push preview is open, nudging the

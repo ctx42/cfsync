@@ -7,6 +7,9 @@
 // vault paths), so it unit-tests with the core's MemFS + QueueHttpClient.
 
 import {
+    type ActionResult,
+    applyActions,
+    type Choice,
     collectStatus,
     loadLinkIndex,
     MetaCache,
@@ -121,6 +124,29 @@ export async function preflight(
  */
 export async function vaultStatus(rt: PluginRuntime): Promise<StatusReport> {
     return collectStatus(await preflightDeps(rt), { ignored: true });
+}
+
+/** applyStatus applies the chosen status-row actions (see {@link applyActions}). */
+export function applyStatus(
+    rt: PluginRuntime,
+    reporter: Reporter,
+    choices: Choice[],
+): Promise<ActionResult[]> {
+    return applyActions(
+        {
+            client: rt.client,
+            fs: rt.fs,
+            yaml: rt.yaml,
+            config: rt.config,
+            reporter,
+            cacheDir: rt.dirs.cacheDir,
+            assetsDir: rt.dirs.assetsDir,
+            linksPath: rt.dirs.linksPath,
+            mintLocalId: rt.mintLocalId,
+            flavor: resolveFlavor(rt.config.flavor),
+        },
+        choices,
+    );
 }
 
 /** markNever writes the ignore-push marker into each new note answered "never". */

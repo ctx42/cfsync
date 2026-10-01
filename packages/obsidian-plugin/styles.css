@@ -469,3 +469,10 @@
     user-select: text;
     cursor: text;
 }
+
+/* Status view: a row's action dropdown sits at the row's end. */
+.cfsync-row-action {
+    margin-left: auto;
+    flex: 0 0 auto;
+    font-size: var(--font-ui-smaller);
+}

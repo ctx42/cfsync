@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: (c) 2026 Rafal Zajac
 // SPDX-License-Identifier: MIT
 
-import { buildConfig, ConfluenceClient } from "@cfsync/core";
+import { buildConfig, ConfluenceClient, NoopReporter } from "@cfsync/core";
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
 import { QueueHttpClient } from "../../../core/test/support/http-queue.ts";
@@ -9,6 +9,7 @@ import { MemFS } from "../../../core/test/support/memfs.ts";
 import type { PluginRuntime } from "../../src/runtime.ts";
 import { runtimeDirs } from "../../src/runtime-dirs.ts";
 import {
+    applyStatus,
     markNever,
     preflight,
     toDest,
@@ -100,5 +101,28 @@ describe("operations", () => {
         expect(have.pull.map((e) => e.name)).toEqual(["wiki/A.md"]);
         const down = await runtime(new QueueHttpClient().rsp(503), fs);
         await expect(vaultStatus(down)).rejects.toThrow("503");
+    });
+
+    it("applyStatus runs the chosen row actions", async () => {
+        const fs = new MemFS();
+        await fs.write("wiki/N.md", "---\ntitle: N\n---\nx\n");
+        const rt = await runtime(new QueueHttpClient(), fs);
+
+        const have = await applyStatus(rt, new NoopReporter(), [
+            {
+                row: {
+                    dest: "wiki/N.md",
+                    name: "wiki/N.md",
+                    kind: "new",
+                    detail: "",
+                },
+                action: "never",
+            },
+        ]);
+
+        expect(have.map((r) => r.ok)).toEqual([true]);
+        expect(await fs.readText("wiki/N.md")).toContain(
+            "cfsync-plugin: ignore-push",
+        );
     });
 });
