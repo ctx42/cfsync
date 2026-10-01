@@ -969,6 +969,108 @@ describe("Puller.pullPages", () => {
         expect(note).not.toContain("<<<<<<<");
     });
 
+    it("drops a resolved footer comment and its section from the note", async () => {
+        // The note was pulled while the footer comment was open, so it carries the
+        // trailing section; the comment has since been resolved, so the render
+        // omits it — and with no footer comment left, the `## Comments` heading
+        // too. A real edit in the body must still survive.
+        const config = buildConfig(
+            {
+                pages: { "notes/page.md": "/wiki/spaces/X/pages/123/Title" },
+                comments: true,
+            },
+            {
+                site: "ex",
+                account: "a@ex.com",
+                token: "secret",
+                syncRoot: "/vault",
+            },
+        );
+        const adf = {
+            version: 1,
+            type: "doc",
+            content: [
+                {
+                    type: "paragraph",
+                    content: [{ type: "text", text: "intro paragraph" }],
+                },
+                {
+                    type: "paragraph",
+                    content: [{ type: "text", text: "hello world" }],
+                },
+            ],
+        };
+        const commentBody = {
+            type: "doc",
+            content: [
+                {
+                    type: "paragraph",
+                    content: [{ type: "text", text: "Looks good." }],
+                },
+            ],
+        };
+        const v2 = "https://ex.atlassian.net/wiki/api/v2";
+        const adfQ = "?body-format=atlas_doc_format";
+        const stub = new StubHttpClient()
+            .on("GET", pageURL("123"), { body: pageBody("123", 3, adf) })
+            .on("GET", `${v2}/pages/123/inline-comments${adfQ}`, {
+                body: JSON.stringify({ results: [], _links: {} }),
+            })
+            .on("GET", `${v2}/pages/123/footer-comments${adfQ}`, {
+                body: JSON.stringify({
+                    results: [
+                        {
+                            id: "F1",
+                            resolutionStatus: "resolved",
+                            version: {
+                                authorId: "jsmith",
+                                createdAt: "2026-07-20T10:00:00Z",
+                            },
+                            body: {
+                                atlas_doc_format: {
+                                    value: JSON.stringify(commentBody),
+                                },
+                            },
+                        },
+                    ],
+                    _links: {},
+                }),
+            })
+            .on("GET", `${v2}/footer-comments/F1/children${adfQ}`, {
+                body: JSON.stringify({ results: [], _links: {} }),
+            });
+
+        const fs = new MemFS();
+        // The note: intro edited, plus the stale footer section.
+        await fs.write(
+            "/vault/notes/page.md",
+            '---\ncfsync-plugin: pull\ntitle: "Title"\npage_id: "123"\n' +
+                'page_version: 3\nspace_id: "9"\n---\n\n' +
+                "intro paragraph edited\n\nhello world\n\n## Comments\n\n" +
+                "> [!comment] id:F1 · @jsmith · 2026-07-20T10:00:00Z\n" +
+                "> Looks good.\n",
+        );
+        // The cached base: a fresh (comment-free) render of the un-edited body.
+        await fs.write(
+            "/data/cache/notes/page.v3.md",
+            "---\npage_version: 3\n---\n\nintro paragraph\n\nhello world\n",
+        );
+        const { puller } = pullerFor(config, stub, fs);
+
+        const out = await puller.pullPages();
+
+        expect(out.errors).toEqual([]);
+        const note = await fs.readText("/vault/notes/page.md");
+        // The resolved thread is gone — no callout, no section heading …
+        expect(note).not.toContain("[!comment]");
+        expect(note).not.toContain("## Comments");
+        expect(note).not.toContain("Looks good.");
+        // … but the edit survives, with no conflict markers.
+        expect(note).toContain("intro paragraph edited");
+        expect(note).toContain("hello world");
+        expect(note).not.toContain("<<<<<<<");
+    });
+
     it("counts unchanged on a second pull but keeps it out of the log", async () => {
         const config = testConfig({ "p.md": "/wiki/spaces/X/pages/123/Title" });
         const stub = new StubHttpClient().on("GET", pageURL("123"), {

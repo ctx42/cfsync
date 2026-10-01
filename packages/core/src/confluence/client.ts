@@ -127,9 +127,9 @@ export interface PageComment {
     /** Whether the comment is anchored to body text (`inline`) or page-level (`footer`). */
     kind: "inline" | "footer";
     /**
-     * The inline comment's resolution: `open`, `resolved`, `reopened`, or
-     * `dangling` (its anchor text no longer exists in the body). Empty for a
-     * footer comment, which has no resolution.
+     * The comment's resolution (`resolutionStatus`): `open`, `resolved`,
+     * `reopened`, or — inline only — `dangling` (its anchor text no longer
+     * exists in the body). Empty when Confluence reports none.
      */
     resolution: string;
     /**
@@ -969,7 +969,7 @@ function concatBytes(...parts: Uint8Array[]): Uint8Array {
  * `inlineOriginalSelection` (the highlighted text) — and are empty for a footer
  * comment, which has no such properties. Confluence returns each under both a
  * camelCase and a kebab-case key (`inline-marker-ref`); the camelCase is read
- * first, the kebab-case a fallback. `resolutionStatus` is likewise inline-only.
+ * first, the kebab-case a fallback. `resolutionStatus` is read for both kinds.
  */
 function parseComment(
     o: Record<string, unknown>,

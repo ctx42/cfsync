@@ -17,7 +17,7 @@ import type { ADF, Node } from "../models/adf.ts";
 import type { FileSystem } from "../ports/fs.ts";
 import { posixJoin } from "../util/path.ts";
 
-/** The resolution word marking a settled inline comment, dropped on pull. */
+/** The resolution word marking a settled comment, dropped on pull. */
 const RESOLVED = "resolved";
 
 /** Matches a `[^cf-<markerRef>]` anchor ref, capturing the marker. */
@@ -33,8 +33,8 @@ const CALLOUT_RE = /^>\s*\[!comment\]\s+id:(\S+)/i;
  * threads. Each comment's ADF body is parsed to its block nodes for the callout.
  *
  * Only comments Confluence shows on the page are kept, so the note matches the CF
- * view. Dropped: resolved inline comments (a settled thread), and inline comments
- * with no marker (unanchored). A marker that survives here but is not found in the
+ * view. Dropped: resolved comments of either kind (a settled thread), and inline
+ * comments with no marker (unanchored). A marker that survives here but is not found in the
  * body at render time is dangling — its highlighted text was deleted, so CF hides
  * it — and the render drops it too.
  */
@@ -45,7 +45,9 @@ export function toRenderComments(comments: PageComments): RenderComments {
         byMarker.set(c.markerRef, toThread(c));
     }
     for (const c of comments.footer) {
-        trailing.push(toThread(c));
+        if (c.resolution !== RESOLVED) {
+            trailing.push(toThread(c));
+        }
     }
     return { byMarker, trailing };
 }
