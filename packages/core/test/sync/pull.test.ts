@@ -1178,6 +1178,43 @@ describe("Puller.pullPages", () => {
         expect(await fs.readText("/vault/p.md")).toContain("beta-local");
     });
 
+    it("overwrites local edits and conflict markers when asked", async () => {
+        const config = testConfig({ "p.md": "/wiki/spaces/X/pages/123/Title" });
+        const stub = new StubHttpClient().on("GET", pageURL("123"), {
+            body: pageBody("123", 3, paras("alpha", "beta", "gamma")),
+        });
+        const { puller, fs } = pullerFor(config, stub);
+        await puller.pullPages();
+        const pulled = await fs.readText("/vault/p.md");
+        await fs.write(
+            "/vault/p.md",
+            pulled.replace(
+                "beta",
+                "<<<<<<< local\nbeta-local\n=======\nb\n>>>>>>> remote",
+            ),
+        );
+        const overwriting = new Puller({
+            client: new ConfluenceClient(stub, {
+                host: config.host,
+                account: config.account,
+                token: config.token,
+            }),
+            fs,
+            config,
+            reporter: new NoopReporter(),
+            cacheDir: "/data/cache",
+            assetsDir: "/vault/_cfsync-media",
+            links: buildLinkIndex(config.syncRoot, config.pages, []),
+            flavor: obsidianFlavor,
+            overwrite: true,
+        });
+
+        const have = await overwriting.pullPages();
+
+        expect(have.stats.updated).toBe(1);
+        expect(await fs.readText("/vault/p.md")).toBe(pulled);
+    });
+
     it("merges local edits with a remote change in a different region", async () => {
         const config = testConfig({ "p.md": "/wiki/spaces/X/pages/123/Title" });
         const seed = new StubHttpClient().on("GET", pageURL("123"), {

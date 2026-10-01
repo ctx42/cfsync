@@ -286,6 +286,12 @@ export interface PullerDeps {
      * fetch — the behaviour before the version probe.
      */
     knownVersions?: Map<string, number>;
+    /**
+     * Replace each note with the fresh render instead of three-way merging it,
+     * discarding local edits — and any unresolved conflict markers — for good.
+     * Defaults to `false`: a pull never loses an edit.
+     */
+    overwrite?: boolean;
 }
 
 /**
@@ -622,7 +628,8 @@ export class Puller {
      * against the cached render of its recorded version (base) and the fresh
      * render (remote):
      *
-     * - the note is missing, or its content already equals the remote: write it;
+     * - the note is missing, or its content already equals the remote, or the
+     *   run overwrites ({@link PullerDeps.overwrite}): write it;
      * - the note carries unresolved conflict markers: leave it untouched so a
      *   re-pull never overwrites a resolution in progress (`conflict`);
      * - the note has no readable frontmatter (foreign or corrupt): overwrite it,
@@ -654,6 +661,11 @@ export class Puller {
         } catch {
             await this.d.fs.write(dest, remote);
             return "wrote";
+        }
+        if (this.d.overwrite === true) {
+            // The caller chose to discard the note's edits: take the render.
+            const wrote = await writeIfChanged(this.d.fs, dest, remote);
+            return wrote ? "wrote" : "kept";
         }
         if (hasConflictMarkers(local)) {
             return "conflict";
