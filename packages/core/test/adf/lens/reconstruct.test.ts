@@ -705,6 +705,45 @@ describe("put mediaGroup", () => {
     });
 });
 
+describe("put captioned mediaSingle", () => {
+    const data = `{ "adf": { "type": "doc", "content": [
+       { "type": "mediaSingle", "attrs": { "layout": "center" }, "content": [
+          { "type": "media", "attrs": {
+            "type": "file", "id": "F1", "localId": "L1", "alt": "a.png" } },
+          { "type": "caption", "attrs": { "localId": "C1" },
+            "content": [ { "type": "text", "text": "cap" } ] } ] },
+       { "type": "paragraph", "attrs": { "localId": "p" },
+         "content": [ { "type": "text", "text": "after" } ] } ] } }`;
+    const assets = { L1: "../_cfsync-media/F1-L1.png" };
+
+    it("renders the image and its caption as one block", () => {
+        const base = newADF(data);
+
+        const have = renderBody(base, assets);
+
+        expect(have).toContain("![[F1-L1.png]]\n```adf\ntype: caption");
+    });
+
+    it("an unchanged captioned image round-trips (GetPut)", () => {
+        const base = newADF(data);
+        const body = renderBody(base, assets);
+
+        const have = put(base, body, null, assets, null);
+
+        expect(json(have)).toBe(json(base));
+    });
+
+    it("editing the paragraph after it leaves the image intact", () => {
+        const base = newADF(data);
+        const body = renderBody(base, assets).replace("after", "later");
+
+        const have = put(base, body, null, assets, null);
+
+        expect(have.doc.content?.[0]).toEqual(base.doc.content?.[0]);
+        expect(json(have)).toContain('"later"');
+    });
+});
+
 describe("put modify (containers)", () => {
     it("editing keeps the panel breakout mark", () => {
         const base = newADF(`{ "adf": { "type": "doc", "content": [

@@ -385,6 +385,12 @@ export class cfsyncView extends ItemView {
             const main = row.createDiv({ cls: "cfsync-prow-main" });
             main.createDiv({ cls: "cfsync-prow-name", text: e.name });
             main.createDiv({ cls: "cfsync-prow-note", text: versionNote(e) });
+            for (const r of e.resolves) {
+                main.createDiv({
+                    cls: "cfsync-prow-note",
+                    text: `resolves comment ${r}`,
+                });
+            }
         }
 
         const actions = root.createDiv({ cls: "cfsync-preview-actions" });

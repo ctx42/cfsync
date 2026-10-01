@@ -508,7 +508,6 @@ export function renderBlock(nod: Node, ctx: MdCtx): string {
         case "codeBlock":
             return renderCodeBlock(nod);
         case "mediaSingle":
-            return renderBlocks(nod.content ?? [], ctx);
         case "mediaGroup":
             return renderMediaGroup(nod, ctx);
         case "media":
@@ -551,9 +550,10 @@ export function basename(p: string): string {
 }
 
 /**
- * renderMediaGroup renders a mediaGroup — a run of attached files — as one image
- * per child on its own line, joined by single newlines so the whole group stays
- * a single top-level block.
+ * renderMediaGroup renders a mediaGroup (a run of attached files) or a
+ * mediaSingle (an image and its optional caption) as one line per child, joined
+ * by single newlines so the whole node stays a single top-level block — a blank
+ * line would split it into two blocks the push diff cannot pair with one node.
  */
 function renderMediaGroup(nod: Node, ctx: MdCtx): string {
     const lines: string[] = [];

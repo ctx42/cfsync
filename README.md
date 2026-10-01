@@ -53,8 +53,8 @@ you work — or use both against the same vault.
 - **Rich formatting survives.** Panels, tables, mentions, status/date/emoji,
   colored and underlined text, and macros all round-trip.
 - **Comments (opt-in).** Inline and footer comments pull in as `[!comment]`
-  callouts with `[^cf-…]` anchors; a push preserves them but never changes them
-  (comments are managed on Confluence). Off by default.
+  callouts with `[^cf-…]` anchors; a push preserves them, and resolves an
+  inline comment whose callout and anchor you removed. Off by default.
 - **Safe concurrent edits.** A three-way merge folds in non-overlapping remote
   changes; a genuine conflict is refused, not clobbered.
 - **Cross-page links** rewrite to local `.md` paths on pull and restore on push.
@@ -305,7 +305,7 @@ The config file (YAML) holds only what to sync:
 |-------------------|----------|-----------------------------------------------------------------|
 | `timeout`         | no       | Per-request HTTP timeout, e.g. `45s` (default `30s`).           |
 | `markdown.margin` | no       | Hard-wrap column for Markdown text; `0`/unset = no wrap.        |
-| `comments`        | no       | Pull comments as read-only `[!comment]` callouts (off).         |
+| `comments`        | no       | Pull comments as `[!comment]` callouts; push resolves (off).    |
 | `pages`           | no²      | Map of destination `.md` under the sync root → Confluence path. |
 | `folders`         | no²      | Map of destination dir under the sync root → Confluence folder. |
 | `spaces`          | no²      | Map of destination dir under the sync root → Confluence space.  |
@@ -420,24 +420,44 @@ alongside the body:
   next pull), and **dangling** inline comments — ones whose highlighted text was
   deleted, so the anchor no longer exists in the body.
 
-Comments are a **read-only overlay, managed entirely on Confluence.** A push
-**strips** the callouts and `[^cf-…]` anchors before reconstructing the body, so
-it never sends a reply, resolution, or new comment — reply to, resolve, and edit
-comments in the Confluence UI. What a push *does* guarantee is that it never
-detaches an existing comment: a Confluence inline comment is an anchor mark the
-platform owns and the body can't otherwise express, so before each update the
-push re-grafts the live page's comment anchors onto the body. A comment survives
-as long as the text it highlights still exists — anywhere it now occurs, the
-closest to its original spot wins — or survives lightly edited: a change of case,
-or a near-match within its own paragraph (a word changed, not a rewrite). When an
-edit rewrites the highlighted words beyond that, the push **moves** each open
+Comments are **managed on Confluence**, with one exception: a push can
+**resolve** an inline comment. A push **strips** the callouts and `[^cf-…]`
+anchors before reconstructing the body, so it never sends a reply, an edit, or a
+new comment — do those in the Confluence UI.
+
+- **Resolve** an inline comment by removing **both** its `[!comment]` callout and
+  its `[^cf-…]` anchor from the note, then pushing. Deleting the whole commented
+  paragraph together with its callout counts. A note whose only change is a
+  resolve pushes no page update and no new version. The push report (and the
+  plugin's push review) lists each resolve by id and highlighted text.
+- Removing **only one** of the two — the callout but not the anchor, or the
+  anchor but not the callout — **fails the push** before anything is sent:
+  remove both to resolve, or restore the removed part to keep the comment.
+- If the thread **changed on Confluence** since your last pull — a new reply, or
+  an edited comment — the push fails and asks you to **pull first**, so a reply
+  you have not seen is never resolved away. A thread already resolved or deleted
+  on Confluence is skipped and reported as already done.
+- **Footer comments** and **replies** are never changed by a push: removing or
+  editing their callouts is ignored, and the next pull restores them.
+- A resolve that fails after the page update succeeded is a warning — the pushed
+  page stands, the comment's callout comes back, and removing it again retries.
+- After a push the note is re-rendered with the comments still open.
+
+What a push *also* guarantees is that it never detaches an existing comment: a
+Confluence inline comment is an anchor mark the platform owns and the body
+can't otherwise express, so before each update the push re-grafts the live
+page's comment anchors onto the body. A comment survives as long as the text it
+highlights still exists — anywhere it now occurs, the closest to its original
+spot wins — or survives lightly edited: a change of case, or a near-match within
+its own paragraph (a word changed, not a rewrite). When an edit rewrites the
+highlighted words beyond that (keeping the anchor), the push **moves** each open
 comment onto the nearest remaining text — its own paragraph when that still
 exists, else the closest surviving one — and names it in a warning; push with
-`--drop-comments` to detach them deliberately instead. Edit prose
-freely — just don't hand-edit the `[!comment]` metadata lines or the `[^cf-…]`
-anchors, which are `cfsync`-managed. Comments are not versioned with the page, so
-every pull re-fetches them; a note left comment-free by an earlier pull picks
-them up on the next one.
+`--drop-comments` to detach them deliberately instead. Edit prose freely — just
+don't hand-edit the `[!comment]` metadata lines or the `[^cf-…]` anchors, which
+are `cfsync`-managed. Comments are not versioned with the page, so every pull
+re-fetches them; a note left comment-free by an earlier pull picks them up on
+the next one.
 
 You freely edit prose, headings, list items, blockquotes, panels, expands, and
 table cells, and add paragraphs and images; the frozen ` ```adf ` blocks and

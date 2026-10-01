@@ -138,6 +138,27 @@ describe("segmentBody", () => {
         expect(have.map((b) => b.text)).toEqual(["- a\n- b", "after"]);
     });
 
+    it("glues a blank-separated caption fence onto its image", () => {
+        const cap = "```adf\ntype: caption\nlocalId: c1\n```";
+
+        const have = segmentBody(`intro\n\n![[a.png]]\n\n${cap}\n\ntail`);
+
+        expect(have.map((b) => b.text)).toEqual([
+            "intro",
+            `![[a.png]]\n${cap}`,
+            "tail",
+        ]);
+        expect(have[1]?.line).toBe(3);
+    });
+
+    it("keeps a caption fence apart from a non-image block", () => {
+        const cap = "```adf\ntype: caption\nlocalId: c1\n```";
+
+        const have = segmentBody(`intro\n\n${cap}`);
+
+        expect(have.map((b) => b.text)).toEqual(["intro", cap]);
+    });
+
     it("an empty body yields no blocks", () => {
         expect(segmentBody("")).toHaveLength(0);
         expect(segmentBody("\n\n  \n")).toHaveLength(0);

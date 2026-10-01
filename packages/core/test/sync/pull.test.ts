@@ -514,6 +514,236 @@ describe("Puller.pullPages", () => {
         expect(note).not.toContain("Anchor text was edited away.");
     });
 
+    it("records each rendered thread's version and replies, refreshing on a cache hit", async () => {
+        const config = buildConfig(
+            {
+                pages: { "notes/page.md": "/wiki/spaces/X/pages/123/Title" },
+                comments: true,
+            },
+            {
+                site: "ex",
+                account: "a@ex.com",
+                token: "secret",
+                syncRoot: "/vault",
+            },
+        );
+        const adf = {
+            version: 1,
+            type: "doc",
+            content: [
+                {
+                    type: "paragraph",
+                    content: [
+                        {
+                            type: "text",
+                            text: "world",
+                            marks: [
+                                {
+                                    type: "annotation",
+                                    attrs: {
+                                        id: "M1",
+                                        annotationType: "inlineComment",
+                                    },
+                                },
+                            ],
+                        },
+                    ],
+                },
+            ],
+        };
+        const v2 = "https://ex.atlassian.net/wiki/api/v2";
+        const adfQ = "?body-format=atlas_doc_format";
+        const empty = JSON.stringify({ results: [], _links: {} });
+        const comment = (id: string, version: number, extra = {}) => ({
+            id,
+            version: { authorId: "u", createdAt: "", number: version },
+            body: { atlas_doc_format: { value: "{}" } },
+            ...extra,
+        });
+        /** stubAt serves the page plus C1 at `version` (dangling C9 too). */
+        const stubAt = (version: number): StubHttpClient =>
+            new StubHttpClient()
+                .on("GET", pageURL("123"), { body: pageBody("123", 3, adf) })
+                .on("GET", `${v2}/pages/123/inline-comments${adfQ}`, {
+                    body: JSON.stringify({
+                        results: [
+                            comment("C1", version, {
+                                resolutionStatus: "open",
+                                properties: {
+                                    inlineMarkerRef: "M1",
+                                    inlineOriginalSelection: "world",
+                                },
+                            }),
+                            comment("C9", 1, {
+                                resolutionStatus: "open",
+                                properties: { inlineMarkerRef: "GONE" },
+                            }),
+                        ],
+                        _links: {},
+                    }),
+                })
+                .on("GET", `${v2}/inline-comments/C1/children${adfQ}`, {
+                    body: JSON.stringify({
+                        results: [comment("R1", 1)],
+                        _links: {},
+                    }),
+                })
+                .on("GET", `${v2}/inline-comments/R1/children${adfQ}`, {
+                    body: empty,
+                })
+                .on("GET", `${v2}/inline-comments/C9/children${adfQ}`, {
+                    body: empty,
+                })
+                .on("GET", `${v2}/pages/123/footer-comments${adfQ}`, {
+                    body: empty,
+                });
+        const { fs } = pullerFor(config, stubAt(2));
+        await pullerFor(config, stubAt(2), fs).puller.pullPages();
+
+        const want = (version: number) => ({
+            threads: [
+                {
+                    id: "C1",
+                    markerRef: "M1",
+                    anchorText: "world",
+                    version,
+                    replies: [{ id: "R1", version: 1 }],
+                },
+            ],
+        });
+        const path = "/data/cache/notes/page.comments.json";
+        expect(JSON.parse(await fs.readText(path))).toEqual(want(2));
+
+        // C1 is edited on Confluence; the page version stays 3 (a cache hit).
+        const { puller } = pullerFor(
+            config,
+            stubAt(3),
+            fs,
+            buildLinkIndex(config.syncRoot, config.pages, []),
+            new Map([["123", 3]]),
+        );
+        await puller.pullPages();
+
+        expect(JSON.parse(await fs.readText(path))).toEqual(want(3));
+    });
+
+    it("re-fetches a cached body that predates a new inline comment", async () => {
+        const config = buildConfig(
+            {
+                pages: { "notes/page.md": "/wiki/spaces/X/pages/123/Title" },
+                comments: true,
+            },
+            {
+                site: "ex",
+                account: "a@ex.com",
+                token: "secret",
+                syncRoot: "/vault",
+            },
+        );
+        const v2 = "https://ex.atlassian.net/wiki/api/v2";
+        const adfQ = "?body-format=atlas_doc_format";
+        const noComments = JSON.stringify({ results: [], _links: {} });
+        // The first pull caches v3 before anyone commented.
+        const seed = new StubHttpClient()
+            .on("GET", pageURL("123"), {
+                body: pageBody("123", 3, paras("hello world")),
+            })
+            .on("GET", `${v2}/pages/123/inline-comments${adfQ}`, {
+                body: noComments,
+            })
+            .on("GET", `${v2}/pages/123/footer-comments${adfQ}`, {
+                body: noComments,
+            });
+        const { fs } = pullerFor(config, seed);
+        await pullerFor(config, seed, fs).puller.pullPages();
+
+        // Confluence then marks "world" for comment C1 without bumping v3.
+        const adf = {
+            version: 1,
+            type: "doc",
+            content: [
+                {
+                    type: "paragraph",
+                    content: [
+                        { type: "text", text: "hello " },
+                        {
+                            type: "text",
+                            text: "world",
+                            marks: [
+                                {
+                                    type: "annotation",
+                                    attrs: {
+                                        id: "M1",
+                                        annotationType: "inlineComment",
+                                    },
+                                },
+                            ],
+                        },
+                    ],
+                },
+            ],
+        };
+        const commentBody = {
+            type: "doc",
+            content: [
+                {
+                    type: "paragraph",
+                    content: [{ type: "text", text: "Where from?" }],
+                },
+            ],
+        };
+        const stub = new StubHttpClient()
+            .on("GET", pageURL("123"), { body: pageBody("123", 3, adf) })
+            .on("GET", `${v2}/pages/123/inline-comments${adfQ}`, {
+                body: JSON.stringify({
+                    results: [
+                        {
+                            id: "C1",
+                            resolutionStatus: "open",
+                            properties: { inlineMarkerRef: "M1" },
+                            version: {
+                                authorId: "jsmith",
+                                createdAt: "2026-07-20T10:00:00Z",
+                            },
+                            body: {
+                                atlas_doc_format: {
+                                    value: JSON.stringify(commentBody),
+                                },
+                            },
+                        },
+                    ],
+                    _links: {},
+                }),
+            })
+            .on("GET", `${v2}/inline-comments/C1/children${adfQ}`, {
+                body: noComments,
+            })
+            .on("GET", `${v2}/pages/123/footer-comments${adfQ}`, {
+                body: noComments,
+            });
+        const { puller } = pullerFor(
+            config,
+            stub,
+            fs,
+            buildLinkIndex(config.syncRoot, config.pages, []),
+            new Map([["123", 3]]),
+        );
+
+        const out = await puller.pullPages();
+
+        expect(out.errors).toEqual([]);
+        const have = await fs.readText("/vault/notes/page.md");
+        expect(have).toContain("hello world[^cf-M1]");
+        expect(have).toContain("> Where from?");
+        expect(await fs.readText("/data/cache/notes/page.v3.json")).toContain(
+            '"M1"',
+        );
+        const pageFetches = stub.requests.filter(
+            (r) => r.url === pageURL("123"),
+        );
+        expect(pageFetches).toHaveLength(1);
+    });
+
     it("self-heals a comment-free note whose cached base was clobbered", async () => {
         // The pre-fix cache-ordering bug left notes comment-free while their
         // cached .vN.md base held the decorated render. A pull must still decorate

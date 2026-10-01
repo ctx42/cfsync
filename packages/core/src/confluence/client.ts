@@ -535,6 +535,33 @@ export class ConfluenceClient {
     }
 
     /**
+     * resolveInlineComment marks the inline comment resolved via the v2 update
+     * endpoint, which takes the next version number and the comment body (sent
+     * back unchanged from `comment.adf`). Throws on a non-2xx status.
+     */
+    async resolveInlineComment(comment: PageComment): Promise<void> {
+        const payload = {
+            version: { number: comment.version + 1 },
+            body: { representation: "atlas_doc_format", value: comment.adf },
+            resolved: true,
+        };
+        const resp = await this.http.do({
+            method: "PUT",
+            url: `${this.cfg.host}${INLINE_COMMENT_ENDPOINT}${comment.id}`,
+            headers: {
+                Authorization: this.auth,
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify(payload),
+        });
+        if (!ok(resp.status)) {
+            throw new Error(
+                `resolve comment ${comment.id}: HTTP ${resp.status}`,
+            );
+        }
+    }
+
+    /**
      * updatePage sends the authenticated v2 update for a page: its new title,
      * version number, and ADF body (as a raw JSON string). It throws on a non-2xx
      * status.

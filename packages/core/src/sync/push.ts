@@ -30,13 +30,27 @@ import {
     writePage,
 } from "../cache/cache.ts";
 import type { Config } from "../config/config.ts";
-import type { ConfluenceClient, PageData } from "../confluence/client.ts";
+import type {
+    ConfluenceClient,
+    PageComments,
+    PageData,
+} from "../confluence/client.ts";
 import type { Flavor } from "../flavor/flavor.ts";
 import { type ADF, type Node, newADF } from "../models/adf.ts";
 import type { FileSystem } from "../ports/fs.ts";
 import type { Reporter } from "../ports/progress.ts";
 import type { Yaml } from "../ports/yaml.ts";
 import { posixJoin } from "../util/path.ts";
+import {
+    checkDrift,
+    describe,
+    planResolves,
+    type Resolution,
+    readRecord,
+    recordThreads,
+    toRenderComments,
+    writeRecord,
+} from "./comments.ts";
 import {
     type CreateInput,
     classifyCreates,
@@ -496,10 +510,14 @@ export class Pusher {
             }
 
             try {
-                const { changed, version, warning } = await this.pushOne(dest);
-                const line = changed
+                const { changed, version, warning, lines } =
+                    await this.pushOne(dest);
+                let line = changed
                     ? `pushing ${name} ... ok (v${version})\n`
                     : `pushing ${name} ... unchanged\n`;
+                for (const l of lines) {
+                    line += `      ${l}\n`;
+                }
                 out.log += line;
                 this.d.reporter.log(line);
                 if (warning !== "") {
@@ -675,19 +693,29 @@ export class Pusher {
      * cached baseline, back-ports the edits with the lens (rebasing onto the live
      * page when the remote moved), and — only when the body or title changed —
      * PUTs the new ADF and refreshes the cache and note to the pushed version.
+     *
+     * With comments on, an inline thread whose callout and anchor the user both
+     * removed is resolved on Confluence after the page update; a note whose only
+     * change is such a removal resolves without a page update. A half-removed
+     * comment, or a thread changed on Confluence since the pull, fails the push
+     * before anything is sent. `lines` reports each resolve.
      */
     async pushOne(dest: string): Promise<{
         changed: boolean;
         version: number;
         warning: string;
+        lines: string[];
     }> {
-        const { meta, body, base, bodyLine } = await loadPushInput(
+        const { meta, body, rawBody, base, bodyLine } = await loadPushInput(
             this.d.fs,
             this.d.yaml,
             this.d.cacheDir,
             this.d.config,
             dest,
         );
+        const name = pageName(this.d.config.syncRoot, dest);
+        const resolutions = await this.planComments(meta.pageId, name, rawBody);
+        const resolving = new Set(resolutions.map((r) => r.thread.markerRef));
         const assets = metaAssets(meta);
         const links = linkMapper(
             this.d.links,
@@ -728,10 +756,31 @@ export class Pusher {
                 meta.title === base.title
             ) {
                 await deleteAttachments(this.d.client, uploaded);
+                uploaded = [];
+                if (resolutions.length === 0) {
+                    return {
+                        changed: false,
+                        version: meta.pageVersion,
+                        warning: "",
+                        lines: [],
+                    };
+                }
+                // Only comments changed: resolve them, no page update.
+                const res = await this.resolveAll(resolutions);
+                const refreshed = await this.refreshNote(
+                    dest,
+                    name,
+                    meta,
+                    JSON.stringify(base.doc),
+                    meta.pageVersion,
+                    assets,
+                    links,
+                );
                 return {
-                    changed: false,
+                    changed: res.resolved > 0,
                     version: meta.pageVersion,
-                    warning: "",
+                    warning: joinWarnings(res.warning, refreshed),
+                    lines: res.lines,
                 };
             }
 
@@ -748,6 +797,7 @@ export class Pusher {
                 force,
                 this.d.dropComments ?? false,
                 bodyLine,
+                resolving,
             );
             await this.d.client.updatePage(
                 meta.pageId,
@@ -759,15 +809,17 @@ export class Pusher {
             // The remote is now updated: the push has SUCCEEDED and must never be
             // reported as failed by a later local-refresh error. Clear the
             // uploaded list (the attachments are live and must survive) and, from
-            // here on, treat every local step as best-effort — stamping the new
-            // version and refreshing the cache/note. Persisting the version to the
-            // note first means a refresh failure cannot leave the note stale at the
-            // old version, which would wrongly re-enter the merge path next push;
-            // the refresh problem is surfaced as a warning, not a hard failure.
+            // here on, treat every local step as best-effort — resolving removed
+            // comments, stamping the new version and refreshing the cache/note.
+            // Persisting the version to the note first means a refresh failure
+            // cannot leave the note stale at the old version, which would wrongly
+            // re-enter the merge path next push; the refresh problem is surfaced
+            // as a warning, not a hard failure.
             const pushedImages = uploaded;
             uploaded = [];
             meta.pageVersion = pushed.version;
-            let warning = pushed.warning;
+            const res = await this.resolveAll(resolutions);
+            let warning = joinWarnings(pushed.warning, res.warning);
             try {
                 await stampPushedVersion(this.d.fs, dest, pushed.version);
                 await canonicalizeImages(
@@ -777,34 +829,134 @@ export class Pusher {
                     this.d.assetsDir,
                     assets,
                 );
-                await refreshAfterPush(
-                    this.d.fs,
-                    this.d.cacheDir,
-                    pageName(this.d.config.syncRoot, dest),
-                    dest,
-                    meta,
-                    pushed.docJSON,
-                    pushed.version,
-                    assets,
-                    links,
-                    this.d.config.margin,
-                    this.d.flavor,
+                warning = joinWarnings(
+                    warning,
+                    await this.refreshNote(
+                        dest,
+                        name,
+                        meta,
+                        pushed.docJSON,
+                        pushed.version,
+                        assets,
+                        links,
+                    ),
                 );
             } catch (err) {
-                const failed =
+                warning = joinWarnings(
+                    warning,
                     `pushed v${pushed.version} but refreshing the local ` +
-                    `copy failed: ${message(err)}`;
-                warning = warning === "" ? failed : `${warning}; ${failed}`;
+                        `copy failed: ${message(err)}`,
+                );
             }
             return {
                 changed: true,
                 version: pushed.version,
                 warning,
+                lines: res.lines,
             };
         } catch (err) {
             await deleteAttachments(this.d.client, uploaded);
             throw err;
         }
+    }
+
+    /**
+     * planComments returns the threads the note at `name` dropped and that push
+     * should resolve, matched against Confluence. It is empty with comments off.
+     * It throws on a half-removed comment ({@link planResolves}) or a thread
+     * changed since the pull ({@link checkDrift}), before any write.
+     */
+    private async planComments(
+        pageId: string,
+        name: string,
+        rawBody: string,
+    ): Promise<Resolution[]> {
+        if (!this.d.config.comments) {
+            return [];
+        }
+        const threads = planResolves(
+            await readRecord(this.d.fs, this.d.cacheDir, name),
+            rawBody,
+        );
+        if (threads.length === 0) {
+            return [];
+        }
+        return checkDrift(threads, await this.d.client.fetchComments(pageId));
+    }
+
+    /**
+     * resolveAll resolves each pending thread on Confluence, reporting one line
+     * per thread. A thread already done is reported, not resolved; a failed
+     * resolve becomes a warning, never an error, so the push stands.
+     */
+    private async resolveAll(
+        resolutions: Resolution[],
+    ): Promise<{ lines: string[]; warning: string; resolved: number }> {
+        const lines: string[] = [];
+        const failed: string[] = [];
+        let resolved = 0;
+        for (const r of resolutions) {
+            if (r.live === null) {
+                lines.push(`${r.done} comment ${describe(r.thread)}`);
+                continue;
+            }
+            try {
+                await this.d.client.resolveInlineComment(r.live);
+                resolved++;
+                lines.push(`resolved comment ${describe(r.thread)}`);
+            } catch (err) {
+                failed.push(`id:${r.thread.id} (${message(err)})`);
+            }
+        }
+        const warning =
+            failed.length === 0
+                ? ""
+                : `resolving comment(s) failed: ${failed.join(", ")}`;
+        return { lines, warning, resolved };
+    }
+
+    /**
+     * refreshNote rewrites the cache and note from `docJSON` at `version` (see
+     * {@link refreshAfterPush}), weaving in the page's comments as they stand
+     * now when comments are on. A failed comment fetch renders none and returns
+     * a warning; the next pull brings them back.
+     */
+    private async refreshNote(
+        dest: string,
+        name: string,
+        meta: PushMeta,
+        docJSON: string,
+        version: number,
+        assets: Record<string, string>,
+        links: ReturnType<typeof linkMapper>,
+    ): Promise<string> {
+        let comments: PageComments | undefined;
+        let warning = "";
+        if (this.d.config.comments) {
+            try {
+                comments = await this.d.client.fetchComments(meta.pageId);
+            } catch (err) {
+                comments = { inline: [], footer: [] };
+                warning =
+                    `fetching comments to refresh the note failed: ` +
+                    `${message(err)}; pull to bring them back`;
+            }
+        }
+        await refreshAfterPush(
+            this.d.fs,
+            this.d.cacheDir,
+            name,
+            dest,
+            meta,
+            docJSON,
+            version,
+            assets,
+            links,
+            this.d.config.margin,
+            this.d.flavor,
+            comments,
+        );
+        return warning;
     }
 }
 
@@ -825,6 +977,8 @@ export interface PreflightEntry {
     remoteVersion: number;
     cls: PreflightClass;
     reason: string;
+    /** The comments a push would resolve (id and highlighted text), one per line. */
+    resolves: string[];
 }
 
 /** PreflightDeps are the ports a {@link pushPreflight} run reads. */
@@ -933,6 +1087,10 @@ export async function pushPreflight(
         ) {
             cls = "unchanged";
         }
+        const resolves =
+            config.comments && cls !== "unchanged"
+                ? await pendingResolves(fs, cacheDir, p.name, p.dest)
+                : [];
         out[p.idx] = entry(
             p.dest,
             p.name,
@@ -941,6 +1099,7 @@ export async function pushPreflight(
             remote,
             cls,
             "",
+            resolves,
         );
     }
     return out as PreflightEntry[];
@@ -955,13 +1114,44 @@ function entry(
     remoteVersion: number,
     cls: PreflightClass,
     reason: string,
+    resolves: string[] = [],
 ): PreflightEntry {
-    return { dest, name, pageId, localBase, remoteVersion, cls, reason };
+    return {
+        dest,
+        name,
+        pageId,
+        localBase,
+        remoteVersion,
+        cls,
+        reason,
+        resolves,
+    };
+}
+
+/**
+ * pendingResolves lists the comments a push of the note at `dest` would
+ * resolve, from local state alone. A note that would fail on a half-removed
+ * comment lists none; the push reports that error.
+ */
+async function pendingResolves(
+    fs: FileSystem,
+    cacheDir: string,
+    name: string,
+    dest: string,
+): Promise<string[]> {
+    try {
+        const { body } = splitFrontmatter(await fs.readText(dest));
+        const threads = await readRecord(fs, cacheDir, name);
+        return planResolves(threads, body).map(describe);
+    } catch {
+        return [];
+    }
 }
 
 /**
  * loadPushInput reads the edited note, splits and parses its frontmatter, and
- * loads the cached baseline ADF of the recorded version. It throws when the
+ * loads the cached baseline ADF of the recorded version. `body` is the note body
+ * stripped of comment decorations; `rawBody` keeps them. It throws when the
  * frontmatter lacks the page id or version needed to push.
  */
 export async function loadPushInput(
@@ -973,6 +1163,7 @@ export async function loadPushInput(
 ): Promise<{
     meta: PushMeta;
     body: string;
+    rawBody: string;
     base: ADF;
     bodyLine: number;
 }> {
@@ -1002,7 +1193,7 @@ export async function loadPushInput(
         pageName(config.syncRoot, dest),
         meta.pageVersion,
     );
-    return { meta, body, base, bodyLine };
+    return { meta, body, rawBody, base, bodyLine };
 }
 
 /**
@@ -1079,6 +1270,7 @@ async function pushDoc(
     force: boolean,
     dropComments: boolean,
     bodyLine: number,
+    resolving: Set<string>,
 ): Promise<{ docJSON: string; version: number; warning: string }> {
     const data = await client.fetchPage(meta.pageId);
     const live = liveADF(data);
@@ -1101,7 +1293,13 @@ async function pushDoc(
     if (dropComments) {
         return { docJSON: out, version: pushed.version, warning: "" };
     }
-    const kept = await keepDetachedComments(client, meta.pageId, live, out);
+    const kept = await keepDetachedComments(
+        client,
+        meta.pageId,
+        live,
+        out,
+        resolving,
+    );
     return { ...kept, version: pushed.version };
 }
 
@@ -1123,6 +1321,7 @@ async function keepDetachedComments(
     pageId: string,
     live: ADF,
     docJSON: string,
+    resolving: Set<string>,
 ): Promise<{ docJSON: string; warning: string }> {
     const doc = JSON.parse(docJSON) as Node;
     const kept = annotationIds(doc);
@@ -1132,7 +1331,10 @@ async function keepDetachedComments(
     }
     const { inline } = await client.fetchComments(pageId);
     const detached = inline.filter(
-        (c) => c.resolution !== "resolved" && lost.includes(c.markerRef),
+        (c) =>
+            c.resolution !== "resolved" &&
+            lost.includes(c.markerRef) &&
+            !resolving.has(c.markerRef),
     );
     if (detached.length === 0) {
         return { docJSON, warning: "" };
@@ -1272,6 +1474,7 @@ async function refreshAfterPush(
     links: ReturnType<typeof linkMapper>,
     margin: number,
     flavor: Flavor,
+    comments?: PageComments,
 ): Promise<void> {
     const page: Page = {
         name,
@@ -1287,10 +1490,24 @@ async function refreshAfterPush(
     const adfPath = posixJoin(cacheDir, cacheFile(page));
     await writePage(fs, adfPath, page);
 
-    const md = flavor.render(pageDoc(page), { assets, links, margin })[0];
+    const doc = pageDoc(page);
+    const md = flavor.render(doc, {
+        assets,
+        links,
+        margin,
+        ...(comments ? { comments: toRenderComments(comments) } : {}),
+    })[0];
     const mdCache = `${adfPath.slice(0, -".json".length)}.md`;
     await fs.write(mdCache, md);
     await fs.write(dest, md);
+    if (comments) {
+        await writeRecord(fs, cacheDir, name, recordThreads(comments, doc));
+    }
+}
+
+/** joinWarnings joins non-empty warnings with `; `. */
+function joinWarnings(...ws: string[]): string {
+    return ws.filter((w) => w !== "").join("; ");
 }
 
 /**

@@ -18,8 +18,11 @@
 // discovery is in `./discover.ts`; this module is the page pull and the
 // `pullConfig`/`pullSelected` entry points.
 
-import { stripCommentDecorations } from "../adf/render/comments.ts";
-import type { CommentThread, RenderComments } from "../adf/render/markdown.ts";
+import {
+    annotationIdsIn,
+    stripCommentDecorations,
+} from "../adf/render/comments.ts";
+import type { RenderComments } from "../adf/render/markdown.ts";
 import {
     cacheFile,
     cacheFileName,
@@ -31,18 +34,23 @@ import {
 import type { Config } from "../config/config.ts";
 import type {
     ConfluenceClient,
-    PageComment,
     PageComments,
     PageData,
 } from "../confluence/client.ts";
 import { pageID, tryPageID } from "../confluence/sources.ts";
 import { type Flavor, resolveFlavor } from "../flavor/flavor.ts";
-import { fileMedia, type Node } from "../models/adf.ts";
+import { fileMedia } from "../models/adf.ts";
 import type { FileSystem } from "../ports/fs.ts";
 import type { Reporter } from "../ports/progress.ts";
 import { posixClean, posixDir, posixJoin } from "../util/path.ts";
 import { mapPool } from "../util/pool.ts";
 import { assetsFromDisk, downloadImages } from "./assets.ts";
+import {
+    countComments,
+    recordThreads,
+    toRenderComments,
+    writeRecord,
+} from "./comments.ts";
 import {
     collides,
     discoverFolder,
@@ -471,18 +479,35 @@ export class Puller {
      * meant to save. It falls back to a full {@link downloadImages} when any
      * referenced image is missing on disk (an earlier pull may have cached the ADF
      * then been interrupted before downloading them).
+     *
+     * Confluence writes a new inline comment's `annotation` mark into the page
+     * body without bumping the page version, so a cached body can predate the
+     * comment and lack its anchor. On a cache hit where an open comment's marker
+     * is missing from the cached ADF, the body is re-fetched and the cache
+     * overwritten, so the comment renders instead of being dropped as dangling.
      */
     private async store(
-        page: Page,
+        cached: Page,
         dest: string,
         cacheHit: boolean,
     ): Promise<{ state: PageState; action: PageAction; version: number }> {
         // Whether the note existed before this pull decides `added` vs `updated`;
         // read it before mergeIntoNote, which may create it.
         const noteExisted = await this.d.fs.exists(dest);
+        // Comments are not versioned with the page, so a warm (cache-hit) pull
+        // still fetches them to catch new or resolved threads. The fetch is
+        // best-effort: a page whose comments cannot be listed still renders its
+        // body, just without the callouts.
+        const fetched = await this.fetchComments(cached.id);
+        const comments = fetched && toRenderComments(fetched);
+        const stale =
+            cacheHit &&
+            comments !== undefined &&
+            missingMarkers(cached, comments);
+        const page = stale ? await this.refetch(cached) : cached;
         const adfPath = posixJoin(this.d.cacheDir, cacheFile(page));
         const exists = await this.d.fs.exists(adfPath);
-        if (!exists) {
+        if (!exists || stale) {
             await writePage(this.d.fs, adfPath, page);
         }
 
@@ -506,11 +531,6 @@ export class Puller {
             this.d.config.domain,
             this.d.config.host,
         );
-        // Comments are not versioned with the page, so a warm (cache-hit) pull
-        // still fetches them to catch new or resolved threads. The fetch is
-        // best-effort: a page whose comments cannot be listed still renders its
-        // body, just without the callouts.
-        const comments = await this.fetchRenderComments(page.id);
         const md = this.d.flavor.render(doc, {
             assets,
             links,
@@ -528,6 +548,16 @@ export class Puller {
         // cache after, so the base stays the previous render during the merge.
         const merge = await this.mergeIntoNote(page, dest, md);
         const wroteCache = await writeIfChanged(this.d.fs, mdCache, md);
+        // Record the inline threads the render drew, so a push can tell which
+        // ones the user removed. A failed fetch drew none, so records none.
+        if (this.d.config.comments) {
+            await writeRecord(
+                this.d.fs,
+                this.d.cacheDir,
+                page.name,
+                fetched ? recordThreads(fetched, doc) : [],
+            );
+        }
 
         const state = storeState(exists, wroteCache, merge);
         return {
@@ -538,8 +568,22 @@ export class Puller {
     }
 
     /**
-     * fetchRenderComments returns the page's comments as {@link RenderComments}
-     * for the render, or undefined when comment pulling is off ({@link
+     * refetch downloads the current body of the cached `page`, keeping the run's
+     * identity (name, space key, parent override, domain) and taking the remote
+     * title, version, and ADF.
+     */
+    private async refetch(page: Page): Promise<Page> {
+        const data = await this.d.client.fetchPage(page.id);
+        return {
+            ...page,
+            title: data.title,
+            version: data.version,
+            adf: data.adf,
+        };
+    }
+
+    /**
+     * fetchComments returns the page's fetched comments, or undefined when comment pulling is off ({@link
      * Config.comments}) or the fetch fails. A failure is non-fatal — a page whose
      * comments are unreadable still pulls its body — but it is logged as a warning
      * rather than swallowed, so a misconfigured or rejected comment API is visible
@@ -547,9 +591,9 @@ export class Puller {
      * fetch that finds none is logged too, so "the API returned nothing" is
      * distinguishable from "the fetch failed".
      */
-    private async fetchRenderComments(
+    private async fetchComments(
         pageId: string,
-    ): Promise<RenderComments | undefined> {
+    ): Promise<PageComments | undefined> {
         if (!this.d.config.comments) {
             return undefined;
         }
@@ -562,7 +606,7 @@ export class Puller {
                     `cfsync: page ${pageId}: no comments returned\n`,
                 );
             }
-            return toRenderComments(fetched);
+            return fetched;
         } catch (err) {
             this.d.reporter.log(
                 `cfsync: page ${pageId}: fetching comments failed: ` +
@@ -1441,70 +1485,21 @@ async function isDivergent(
     return base === null || body !== base;
 }
 
-/** The resolution word marking a settled inline comment, dropped on pull. */
-const RESOLVED = "resolved";
-
 /**
- * toRenderComments projects the client's fetched {@link PageComments} onto the
- * render's {@link RenderComments}: inline comments carrying a marker are keyed by
- * it for anchor placement, and footer (page-level) comments become trailing
- * threads. Each comment's ADF body is parsed to its block nodes for the callout.
- *
- * Only comments Confluence shows on the page are kept, so the note matches the CF
- * view. Dropped: resolved inline comments (a settled thread), and inline comments
- * with no marker (unanchored). A marker that survives here but is not found in the
- * body at render time is dangling — its highlighted text was deleted, so CF hides
- * it — and the render drops it too (see {@link trailingComments}).
+ * missingMarkers reports whether an open inline thread in `comments` anchors to
+ * a marker absent from `page`'s body — a sign the body predates the comment.
  */
-function toRenderComments(comments: PageComments): RenderComments {
-    const byMarker = new Map<string, CommentThread>();
-    const trailing: CommentThread[] = [];
-    for (const c of comments.inline) {
-        if (c.resolution === RESOLVED || c.markerRef === "") {
-            continue;
+function missingMarkers(page: Page, comments: RenderComments): boolean {
+    if (comments.byMarker.size === 0) {
+        return false;
+    }
+    const present = new Set(annotationIdsIn(pageDoc(page).doc));
+    for (const marker of comments.byMarker.keys()) {
+        if (!present.has(marker)) {
+            return true;
         }
-        byMarker.set(c.markerRef, toThread(c));
     }
-    for (const c of comments.footer) {
-        trailing.push(toThread(c));
-    }
-    return { byMarker, trailing };
-}
-
-/** countComments totals a comment list including every nested reply. */
-function countComments(comments: PageComment[]): number {
-    let n = 0;
-    for (const c of comments) {
-        n += 1 + countComments(c.replies);
-    }
-    return n;
-}
-
-/** toThread maps one {@link PageComment} (and its replies) to a {@link CommentThread}. */
-function toThread(comment: PageComment): CommentThread {
-    return {
-        id: comment.id,
-        markerRef: comment.markerRef,
-        resolution: comment.resolution,
-        authorId: comment.authorId,
-        createdAt: comment.createdAt,
-        body: commentBody(comment.adf),
-        replies: comment.replies.map(toThread),
-    };
-}
-
-/**
- * commentBody parses a comment's ADF body (a `doc` JSON string) to its top-level
- * block nodes, the content the callout renders. An unparseable or malformed body
- * yields no blocks, so the callout still shows its metadata line.
- */
-function commentBody(adf: string): Node[] {
-    try {
-        const doc = JSON.parse(adf) as { content?: Node[] };
-        return Array.isArray(doc.content) ? doc.content : [];
-    } catch {
-        return [];
-    }
+    return false;
 }
 
 /** message returns an unknown thrown value's message. */

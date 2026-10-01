@@ -257,7 +257,43 @@ export function segmentBody(body: string): MdBlock[] {
         push(i, ln);
     }
     flush();
-    return blocks;
+    return joinCaptions(blocks);
+}
+
+/**
+ * joinCaptions glues a frozen ` ```adf ` caption fence onto the image block
+ * before it. A captioned mediaSingle renders as one block — the embed and its
+ * caption on adjacent lines — but notes rendered before that layout carry a
+ * blank line between the two, which would split one ADF node into two blocks.
+ */
+function joinCaptions(blocks: MdBlock[]): MdBlock[] {
+    const out: MdBlock[] = [];
+    for (const b of blocks) {
+        const prev = out[out.length - 1];
+        if (
+            prev !== undefined &&
+            isCaptionFence(b.text) &&
+            isImages(prev.text)
+        ) {
+            out[out.length - 1] = newBlock(
+                `${prev.text}\n${b.text}`,
+                prev.line,
+            );
+            continue;
+        }
+        out.push(b);
+    }
+    return out;
+}
+
+/** isCaptionFence reports whether text is a frozen ` ```adf ` caption node. */
+function isCaptionFence(text: string): boolean {
+    return text.startsWith("```adf\ntype: caption\n");
+}
+
+/** isImages reports whether every line of text is an image embed. */
+function isImages(text: string): boolean {
+    return text.split("\n").every((ln) => ln.startsWith("!["));
 }
 
 /**
