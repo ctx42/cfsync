@@ -405,6 +405,47 @@ describe("put modify", () => {
         expect(() => put(base, edited, null, null, null)).toThrow("(line 8)");
     });
 
+    it("round-trips alternating numbered and bullet lists", () => {
+        const item = (t: string) => `{ "type": "listItem", "content": [
+           { "type": "paragraph", "content": [ { "type": "text", "text": "${t}" } ] },
+           { "type": "paragraph", "content": [ { "type": "text", "text": "${t} more" } ] } ] }`;
+        const base = newADF(`{ "adf": { "type": "doc", "content": [
+           { "type": "orderedList", "attrs": { "order": 1 }, "content": [ ${item("one")} ] },
+           { "type": "bulletList", "content": [ ${item("a")} ] },
+           { "type": "orderedList", "attrs": { "order": 2 }, "content": [ ${item("two")} ] }
+        ] } }`);
+
+        const have = put(base, renderBody(base), null, null, null);
+
+        expect(json(have)).toBe(json(base));
+    });
+
+    it("round-trips and edits bullet lists split by an empty paragraph", () => {
+        const item = (t: string) => `{ "type": "listItem", "content": [
+           { "type": "paragraph", "content": [ { "type": "text", "text": "${t}" } ] },
+           { "type": "paragraph", "content": [ { "type": "text", "text": "${t} more" } ] } ] }`;
+        const base = newADF(`{ "adf": { "type": "doc", "content": [
+           { "type": "bulletList", "content": [ ${item("a")} ] },
+           { "type": "paragraph" },
+           { "type": "bulletList", "content": [ ${item("b")}, ${item("c")} ] }
+        ] } }`);
+
+        expect(json(put(base, renderBody(base), null, null, null))).toBe(
+            json(base),
+        );
+        const have = put(
+            base,
+            renderBody(base).replace("c more", "c edited"),
+            null,
+            null,
+            null,
+        );
+
+        const second = have.doc.content?.[2]?.content?.[1]?.content?.[1];
+        expect(second?.content?.[0]?.text).toBe("c edited");
+        expect(have.doc.content?.[1]).toEqual({ type: "paragraph" });
+    });
+
     it("leaves an ordinary code block untouched", () => {
         const base = newADF(`{ "adf": { "type": "doc", "content": [
            { "type": "codeBlock", "attrs": { "language": "go" },

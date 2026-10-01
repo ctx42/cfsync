@@ -198,7 +198,7 @@ function normalizeTable(text: string): string {
  * emitted whole even when they span blank lines: a fenced code region and a list
  * (whose multi-paragraph items are blank-line separated). A blank line inside a
  * list is internal when the next non-blank line is an item continuation
- * (indented) or the next item marker; otherwise it ends the list.
+ * (indented) or the next item marker of the same kind; otherwise it ends the list.
  */
 export function segmentBody(body: string): MdBlock[] {
     const lines = body.split("\n");
@@ -207,6 +207,7 @@ export function segmentBody(body: string): MdBlock[] {
     let curStart = 1; // 1-based body line of cur[0]
     let inFence = false;
     let inList = false;
+    let kind: ListKind = "bullet";
 
     // push records the block's start line the moment cur becomes non-empty.
     const push = (i: number, ln: string): void => {
@@ -244,7 +245,7 @@ export function segmentBody(body: string): MdBlock[] {
             continue;
         }
         if (isBlankLine(ln)) {
-            if (inList && listContinues(lines, i)) {
+            if (inList && listContinues(lines, i, kind)) {
                 push(i, ln); // internal blank of a loose list
                 continue;
             }
@@ -253,6 +254,7 @@ export function segmentBody(body: string): MdBlock[] {
         }
         if (cur.length === 0 && isListStart(ln)) {
             inList = true;
+            kind = listKind(ln);
         }
         push(i, ln);
     }
@@ -310,17 +312,132 @@ export function isListStart(ln: string): boolean {
 }
 
 /**
- * listContinues reports whether the list containing the blank line at index i
- * keeps going: it does when the next non-blank line is an indented item
- * continuation or the next item marker.
+ * splitMergedLists splits each user block that {@link segmentBody} merged from
+ * several adjacent same-kind lists back into one block per list, following the
+ * baseline. Two bullet lists with nothing (or only an empty paragraph, which
+ * renders to nothing) between them read as one loose list, so the text alone
+ * cannot tell where one ends; the baseline blocks (one per rendered node) can.
+ * For each run of two or more adjacent same-kind list blocks in `base`, the
+ * first not-yet-split user list of that kind carrying the run's total item
+ * count is cut at the same item boundaries. A user block whose item count no
+ * longer matches (an item added or removed) is left whole, for the lens to
+ * judge as before.
  */
-function listContinues(lines: string[], i: number): boolean {
+export function splitMergedLists(user: MdBlock[], base: MdBlock[]): MdBlock[] {
+    const runs = mergedListRuns(base);
+    if (runs.length === 0) {
+        return user;
+    }
+    const out: MdBlock[] = [];
+    for (const blk of user) {
+        const first = blk.text.split("\n", 1)[0] ?? "";
+        const at = isListStart(first)
+            ? runs.findIndex(
+                  (r) =>
+                      r.kind === listKind(first) &&
+                      itemStarts(blk.text, r.kind).length === total(r.counts),
+              )
+            : -1;
+        const run = runs[at];
+        if (run === undefined) {
+            out.push(blk);
+            continue;
+        }
+        runs.splice(at, 1);
+        out.push(...cutAtItems(blk, run.kind, run.counts));
+    }
+    return out;
+}
+
+/** ListRun is a run of adjacent same-kind baseline lists: their item counts. */
+interface ListRun {
+    kind: ListKind;
+    counts: number[];
+}
+
+/** mergedListRuns finds the runs of two or more adjacent same-kind lists in `base`. */
+function mergedListRuns(base: MdBlock[]): ListRun[] {
+    const runs: ListRun[] = [];
+    let cur: ListRun | null = null;
+    for (const b of base) {
+        const first = b.text.split("\n", 1)[0] ?? "";
+        const kind = isListStart(first) ? listKind(first) : null;
+        if (kind !== null && cur !== null && cur.kind === kind) {
+            cur.counts.push(itemStarts(b.text, kind).length);
+            continue;
+        }
+        if (cur !== null && cur.counts.length > 1) {
+            runs.push(cur);
+        }
+        cur =
+            kind === null
+                ? null
+                : { kind, counts: [itemStarts(b.text, kind).length] };
+    }
+    if (cur !== null && cur.counts.length > 1) {
+        runs.push(cur);
+    }
+    return runs;
+}
+
+/** total sums item counts. */
+function total(counts: number[]): number {
+    return counts.reduce((a, b) => a + b, 0);
+}
+
+/** itemStarts returns the line indices of the top-level item markers of `kind` in a list. */
+function itemStarts(text: string, kind: ListKind): number[] {
+    const out: number[] = [];
+    for (const [i, ln] of text.split("\n").entries()) {
+        if (isListStart(ln) && listKind(ln) === kind) {
+            out.push(i);
+        }
+    }
+    return out;
+}
+
+/** cutAtItems splits a list block into consecutive lists of `counts` items each. */
+function cutAtItems(blk: MdBlock, kind: ListKind, counts: number[]): MdBlock[] {
+    const lines = blk.text.split("\n");
+    const starts = itemStarts(blk.text, kind);
+    const out: MdBlock[] = [];
+    let item = 0;
+    for (const n of counts) {
+        const from = starts[item] ?? lines.length;
+        item += n;
+        const to = starts[item] ?? lines.length;
+        let end = to;
+        while (end > from && isBlankLine(lines[end - 1] ?? "")) {
+            end--;
+        }
+        out.push(newBlock(lines.slice(from, end).join("\n"), blk.line + from));
+    }
+    return out;
+}
+
+/** ListKind is the marker family of a top-level list. */
+type ListKind = "bullet" | "ordered";
+
+/** listKind returns the marker family of the list item starting ln. */
+function listKind(ln: string): ListKind {
+    return orderedMarkerWidth(ln) > 0 ? "ordered" : "bullet";
+}
+
+/**
+ * listContinues reports whether the list of `kind` containing the blank line at
+ * index i keeps going: it does when the next non-blank line is an indented item
+ * continuation or the next item marker of the same kind. A marker of the other
+ * kind starts a new list, as in CommonMark — the renderer emits adjacent
+ * numbered and bullet lists as separate blocks, and treating them as one would
+ * pair the merged text with a single list node and refuse an unedited note.
+ */
+function listContinues(lines: string[], i: number, kind: ListKind): boolean {
     for (let j = i + 1; j < lines.length; j++) {
         const lj = lines[j] ?? "";
         if (isBlankLine(lj)) {
             continue;
         }
-        return lj.startsWith(" ") || isListStart(lj);
+        return lj.startsWith(" ") || (isListStart(lj) && listKind(lj) === kind);
     }
     return false;
 }

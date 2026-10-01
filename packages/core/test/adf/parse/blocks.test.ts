@@ -10,8 +10,10 @@
 import { describe, expect, it } from "vitest";
 import {
     isThematicBreak,
+    newBlock,
     normalizeBlock,
     segmentBody,
+    splitMergedLists,
     splitTableRow,
 } from "../../../src/adf/parse/blocks.ts";
 import { escapeTableCell } from "../../../src/adf/render/table.ts";
@@ -181,5 +183,69 @@ describe("splitTableRow", () => {
         const escaped = escapeTableCell(text);
         expect(escaped).toBe(String.raw`a\\b\|c`);
         expect(splitTableRow(`| ${escaped} |`)).toEqual([text]);
+    });
+});
+
+describe("segmentBody list boundaries", () => {
+    it("ends a list where a list of the other kind starts", () => {
+        const have = segmentBody("1. one\n\n   more\n\n- a\n- b\n\n2. two");
+
+        expect(have.map((b) => b.text)).toEqual([
+            "1. one\n\n   more",
+            "- a\n- b",
+            "2. two",
+        ]);
+        expect(have.map((b) => b.line)).toEqual([1, 5, 8]);
+    });
+
+    it("keeps a loose list of one kind whole", () => {
+        const have = segmentBody("- a\n\n- b\n\n- c");
+
+        expect(have.map((b) => b.text)).toEqual(["- a\n\n- b\n\n- c"]);
+    });
+});
+
+describe("splitMergedLists", () => {
+    const base = [
+        newBlock("Intro."),
+        newBlock("- a\n\n  detail"),
+        newBlock("- b\n- c"),
+        newBlock("Outro."),
+    ];
+
+    it("splits a merged list along the baseline's list boundaries", () => {
+        const user = segmentBody(
+            "Intro.\n\n- a\n\n  detail\n\n- b\n- c\n\nOutro.",
+        );
+        expect(user).toHaveLength(3);
+
+        const have = splitMergedLists(user, base);
+
+        expect(have.map((b) => b.text)).toEqual([
+            "Intro.",
+            "- a\n\n  detail",
+            "- b\n- c",
+            "Outro.",
+        ]);
+        expect(have.map((b) => b.line)).toEqual([1, 3, 7, 10]);
+    });
+
+    it("splits an edited merged list with the same item count", () => {
+        const user = segmentBody("- a!\n\n  detail\n\n- b\n- c!");
+
+        const have = splitMergedLists(user, base);
+
+        expect(have.map((b) => b.text)).toEqual([
+            "- a!\n\n  detail",
+            "- b\n- c!",
+        ]);
+    });
+
+    it("leaves a merged list whole when an item was added", () => {
+        const user = segmentBody("- a\n\n  detail\n\n- b\n- c\n- d");
+
+        const have = splitMergedLists(user, base);
+
+        expect(have).toEqual(user);
     });
 });

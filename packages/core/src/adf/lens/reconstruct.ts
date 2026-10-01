@@ -33,6 +33,7 @@ import {
     normalizeInlineText,
     orderedMarkerWidth,
     segmentBody,
+    splitMergedLists,
     splitTableRow,
 } from "../parse/blocks.ts";
 import { codeFenceEnd, type ParseCtx, parseInline } from "../parse/inline.ts";
@@ -133,7 +134,10 @@ export function putLinks(
     const pc: ParseCtx = { mentions: mentions ?? {}, links };
     const base = assets ?? {};
     const [baseBlocks, origins] = baselineBlocks(adf, base, links);
-    const userBlocks = segmentBody(normalizeLegacyRules(body));
+    const userBlocks = splitMergedLists(
+        segmentBody(normalizeLegacyRules(body)),
+        baseBlocks,
+    );
     const edits = diffBlocks(baseBlocks, userBlocks);
 
     const out = clone(adf);
