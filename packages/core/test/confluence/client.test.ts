@@ -140,6 +140,22 @@ describe("fetchPage", () => {
         );
     });
 
+    it("fetches a historical version when one is given", async () => {
+        const stub = new StubHttpClient().on("GET", `${pageURL}&version=2`, {
+            body: JSON.stringify({
+                id: "123",
+                title: "Old",
+                version: { number: 2 },
+                body: { atlas_doc_format: { value: '{"type":"doc"}' } },
+            }),
+        });
+
+        const have = await clientWith(stub).fetchPage("123", 2);
+
+        expect(have.version).toBe(2);
+        expect(have.title).toBe("Old");
+    });
+
     it("rejects a non-2xx status", async () => {
         const stub = new StubHttpClient().on("GET", pageURL, { status: 404 });
         await expect(clientWith(stub).fetchPage("123")).rejects.toThrow(

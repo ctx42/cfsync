@@ -1,15 +1,17 @@
 // SPDX-FileCopyrightText: (c) 2026 Rafal Zajac
 // SPDX-License-Identifier: MIT
 
-// The CLI's interactive confirmations, ported from `confirmCreates`/`promptStale`
-// in `pkg/cfsync`. Push asks which new pages to create (with a sticky "all"/"skip
-// all"); clean asks whether to remove the stale files it found. Both refuse to
-// prompt when stdin is not a terminal, directing the user to `--yes`, so a piped
-// or CI run never blocks. The line reader is injected (`ask`) so the decision
-// logic is tested without a real TTY; `nodeAsk` wires the real one over readline.
+// The CLI's interactive confirmations. Push shows a checkbox list of the new
+// pages, each to create, skip this time, or never ask about again (see
+// select.ts); clean asks whether to remove the stale files it found. Both refuse
+// to prompt when stdin is not a terminal, directing the user to `--yes`, so a
+// piped or CI run never blocks. The inputs are injected (`ask`, `keys`) so the
+// decision logic is tested without a real TTY; `nodeAsk` wires the real line
+// reader over readline.
 
 import { createInterface } from "node:readline/promises";
 import { type CreateInput, pageName, type StaleItem } from "@cfsync/core";
+import { type KeySource, runSelect } from "./select.ts";
 
 /** PromptOptions are the shared inputs for a confirmation. */
 export interface PromptOptions {
@@ -23,13 +25,19 @@ export interface PromptOptions {
     err: (text: string) => void;
     /** Ask a question and read one line of input. */
     ask: (question: string) => Promise<string>;
+    /** Open a raw keypress source for the new-page selector. */
+    keys: () => KeySource;
+    /** Mark the note at `dest` ignore-push — the selector's "never" answer. */
+    markNever: (dest: string) => Promise<void>;
 }
 
 /**
  * confirmCreates decides which create candidates to make, the callback push's
  * `planCreates` expects. It prints the summary, then accepts all with `--yes`,
- * refuses to prompt without a terminal, or asks per page with a sticky
- * "all"/"skip all". Returns each candidate's dest mapped to its create decision.
+ * refuses to prompt without a terminal, or shows the checkbox selector with
+ * every page undecided. A page marked "never" gets the ignore-push marker and is
+ * not created; an undecided one is skipped and asked about again next push.
+ * Returns each candidate's dest mapped to its create decision.
  */
 export async function confirmCreates(
     cands: CreateInput[],
@@ -53,22 +61,16 @@ export async function confirmCreates(
         );
     }
 
-    let sticky = ""; // "all" | "skip" once a bulk choice is made
-    for (const c of cands) {
-        if (sticky !== "") {
-            decided.set(c.dest, sticky === "all");
-            continue;
+    const labels = cands.map(
+        (c) => `${pageName(opts.syncRoot, c.dest)} — "${c.title}"`,
+    );
+    const choices = await runSelect(labels, opts.keys(), opts.err);
+    for (const [i, c] of cands.entries()) {
+        const choice = choices[i] ?? "later";
+        if (choice === "never") {
+            await opts.markNever(c.dest);
         }
-        const choice = await askCreate(
-            opts.ask,
-            pageName(opts.syncRoot, c.dest),
-        );
-        if (choice === "all" || choice === "skip") {
-            sticky = choice;
-            decided.set(c.dest, choice === "all");
-        } else {
-            decided.set(c.dest, choice === "yes");
-        }
+        decided.set(c.dest, choice === "create");
     }
     return decided;
 }
@@ -95,26 +97,6 @@ export async function confirmStale(
         .trim()
         .toLowerCase();
     return line === "y" || line === "yes" ? items : [];
-}
-
-/** askCreate asks about one page, looping until a recognized choice is entered. */
-async function askCreate(
-    ask: (q: string) => Promise<string>,
-    name: string,
-): Promise<"yes" | "no" | "all" | "skip"> {
-    for (;;) {
-        const line = (
-            await ask(`Create ${name}? [y=yes, n=no, a=all, s=skip all]: `)
-        )
-            .trim()
-            .toLowerCase();
-        if (line === "y" || line === "yes") return "yes";
-        if (line === "n" || line === "no") return "no";
-        if (line === "a" || line === "all") return "all";
-        if (line === "s" || line === "skip all" || line === "skip-all") {
-            return "skip";
-        }
-    }
 }
 
 /** createSummary lists the new pages a push would create, one per line. */

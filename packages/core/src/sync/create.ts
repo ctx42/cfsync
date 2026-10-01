@@ -623,3 +623,33 @@ export async function rollbackFolders(
 function message(err: unknown): string {
     return err instanceof Error ? err.message : String(err);
 }
+
+/** IGNORE_PUSH_LINE is the frontmatter line that keeps a note out of push. */
+const IGNORE_PUSH_LINE = "cfsync-plugin: ignore-push";
+
+/**
+ * markIgnorePush writes `cfsync-plugin: ignore-push` into the frontmatter of
+ * the note at `dest`, so push never creates or updates it and `status` hides it
+ * — the "never" answer for a new note. An existing `cfsync-plugin:` line is
+ * replaced, else the line is appended to the frontmatter; every other byte of
+ * the note is kept. It throws when the note has no frontmatter.
+ */
+export async function markIgnorePush(
+    fs: FileSystem,
+    dest: string,
+): Promise<void> {
+    const text = await fs.readText(dest);
+    if (!text.startsWith("---\n")) {
+        throw new Error(`${dest}: file has no frontmatter`);
+    }
+    const end = text.indexOf("\n---", "---".length);
+    if (end < 0) {
+        throw new Error(`${dest}: file has unterminated frontmatter`);
+    }
+    const head = text.slice(0, end + 1);
+    const tail = text.slice(end + 1);
+    const updated = /^cfsync-plugin:.*$/m.test(head)
+        ? head.replace(/^cfsync-plugin:.*$/m, IGNORE_PUSH_LINE)
+        : `${head}${IGNORE_PUSH_LINE}\n`;
+    await fs.write(dest, updated + tail);
+}

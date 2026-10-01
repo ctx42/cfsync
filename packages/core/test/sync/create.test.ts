@@ -11,6 +11,7 @@ import type { Yaml } from "../../src/ports/yaml.ts";
 import {
     classifyCreates,
     deSlugTitle,
+    markIgnorePush,
     rootOf,
     underAnyRoot,
 } from "../../src/sync/create.ts";
@@ -226,5 +227,41 @@ describe("classifyCreates", () => {
         // No real anchor (the local file is excluded), and the dir is the root.
         expect(r.candidates).toEqual([]);
         expect(r.refusals.get("/v/team/new.md")).toContain("cannot derive");
+    });
+});
+
+describe("markIgnorePush", () => {
+    it("appends the marker, keeping every other byte", async () => {
+        const fs = new MemFS();
+        await fs.write("/v/a.md", "---\ntitle: A\n---\n\nBody\n\n");
+
+        await markIgnorePush(fs, "/v/a.md");
+
+        expect(await fs.readText("/v/a.md")).toBe(
+            "---\ntitle: A\ncfsync-plugin: ignore-push\n---\n\nBody\n\n",
+        );
+    });
+
+    it("replaces an existing cfsync-plugin line", async () => {
+        const fs = new MemFS();
+        await fs.write(
+            "/v/a.md",
+            "---\ncfsync-plugin: pull\ntitle: A\n---\nB\n",
+        );
+
+        await markIgnorePush(fs, "/v/a.md");
+
+        expect(await fs.readText("/v/a.md")).toBe(
+            "---\ncfsync-plugin: ignore-push\ntitle: A\n---\nB\n",
+        );
+    });
+
+    it("throws on a note with no frontmatter", async () => {
+        const fs = new MemFS();
+        await fs.write("/v/a.md", "Body\n");
+
+        await expect(markIgnorePush(fs, "/v/a.md")).rejects.toThrow(
+            "no frontmatter",
+        );
     });
 });

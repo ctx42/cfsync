@@ -43,4 +43,5 @@ export * from "./sync/images.ts";
 export * from "./sync/linkindex.ts";
 export * from "./sync/pull.ts";
 export * from "./sync/push.ts";
+export * from "./sync/status.ts";
 export * from "./util/path.ts";

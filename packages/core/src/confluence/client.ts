@@ -221,13 +221,16 @@ export class ConfluenceClient {
 
     /**
      * fetchPage requests the page with the numeric id, asking for its body in
-     * Atlassian Document Format, and returns the fields the lens needs. It throws
-     * when the ADF body is not parseable JSON.
+     * Atlassian Document Format, and returns the fields the lens needs. With
+     * `version` it fetches that historical version instead of the current one
+     * (e.g. a note's base version missing from the cache). It throws when the
+     * ADF body is not parseable JSON.
      */
-    async fetchPage(id: string): Promise<PageData> {
+    async fetchPage(id: string, version?: number): Promise<PageData> {
         const url =
             `${this.cfg.host}${PAGE_ENDPOINT}${id}` +
-            "?body-format=atlas_doc_format";
+            "?body-format=atlas_doc_format" +
+            (version === undefined ? "" : `&version=${version}`);
         const resp = await this.get(url);
         if (!ok(resp.status)) {
             throw new Error(`page ${id}: HTTP ${resp.status}`);

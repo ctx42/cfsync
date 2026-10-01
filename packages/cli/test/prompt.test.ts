@@ -8,6 +8,23 @@ import {
     confirmStale,
     type PromptOptions,
 } from "../src/prompt.ts";
+import type { KeySource } from "../src/select.ts";
+
+/** scripted is a KeySource replaying `keys`, then failing like a closed stdin. */
+function scripted(keys: string[]): KeySource & { closed: boolean } {
+    let i = 0;
+    const src = {
+        closed: false,
+        next: () =>
+            i < keys.length
+                ? Promise.resolve(keys[i++] ?? "")
+                : Promise.reject(new Error("prompt: input closed")),
+        close: () => {
+            src.closed = true;
+        },
+    };
+    return src;
+}
 
 const cand = (dest: string): CreateInput => ({
     dest,
@@ -29,6 +46,8 @@ function opts(
         yes: false,
         err: () => {},
         ask: () => Promise.resolve(answers[i++] ?? ""),
+        keys: () => scripted([]),
+        markNever: () => Promise.resolve(),
         ...over,
     };
 }
@@ -50,23 +69,57 @@ describe("confirmCreates", () => {
         expect(asked).toBe(0);
     });
 
-    it("applies a sticky 'all' from the first answer to the rest", async () => {
-        const decided = await confirmCreates(
-            [cand("/v/a.md"), cand("/v/b.md"), cand("/v/c.md")],
-            opts({}, ["a"]),
-        );
-        expect(decided.get("/v/a.md")).toBe(true);
-        expect(decided.get("/v/b.md")).toBe(true);
-        expect(decided.get("/v/c.md")).toBe(true);
-    });
-
-    it("records per-page yes/no answers", async () => {
+    it("creates nothing when enter is pressed straight away", async () => {
+        const marked: string[] = [];
         const decided = await confirmCreates(
             [cand("/v/a.md"), cand("/v/b.md")],
-            opts({}, ["y", "n"]),
+            opts({
+                keys: () => scripted(["\r"]),
+                markNever: (d) => {
+                    marked.push(d);
+                    return Promise.resolve();
+                },
+            }),
+        );
+        expect([...decided.values()]).toEqual([false, false]);
+        expect(marked).toEqual([]);
+    });
+
+    it("creates ticked pages, marks never ones, and skips the rest", async () => {
+        const marked: string[] = [];
+        const keys = scripted(["c", "\x1b[B", "n", "\x1b[B", "\r"]);
+        const decided = await confirmCreates(
+            [cand("/v/a.md"), cand("/v/b.md"), cand("/v/c.md")],
+            opts({
+                keys: () => keys,
+                markNever: (d) => {
+                    marked.push(d);
+                    return Promise.resolve();
+                },
+            }),
         );
         expect(decided.get("/v/a.md")).toBe(true);
         expect(decided.get("/v/b.md")).toBe(false);
+        expect(decided.get("/v/c.md")).toBe(false);
+        expect(marked).toEqual(["/v/b.md"]);
+        expect(keys.closed).toBe(true);
+    });
+
+    it("aborts on cancel without marking anything", async () => {
+        const marked: string[] = [];
+        await expect(
+            confirmCreates(
+                [cand("/v/a.md")],
+                opts({
+                    keys: () => scripted(["n", "q"]),
+                    markNever: (d) => {
+                        marked.push(d);
+                        return Promise.resolve();
+                    },
+                }),
+            ),
+        ).rejects.toThrow("push cancelled");
+        expect(marked).toEqual([]);
     });
 
     it("refuses to prompt without a terminal", async () => {

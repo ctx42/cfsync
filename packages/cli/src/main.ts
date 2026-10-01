@@ -17,6 +17,7 @@ import {
     ConfluenceClient,
     type FileSystem,
     type HttpClient,
+    markIgnorePush,
     NoopReporter,
     type Reporter,
     type Streams,
@@ -44,6 +45,7 @@ import {
 } from "./config-load.ts";
 import { confirmCreates, confirmStale } from "./prompt.ts";
 import { newReporter } from "./reporter.ts";
+import type { KeySource } from "./select.ts";
 import { VERSION } from "./version.ts";
 
 /** Process exit codes. */
@@ -70,6 +72,11 @@ export interface MainCtx {
     stdinIsTTY?: boolean;
     /** Reads one line of input for a confirmation prompt. */
     ask: (question: string) => Promise<string>;
+    /**
+     * Opens a raw keypress source for push's new-page selector. Omitted where
+     * no interactive keyboard exists (tests that never reach the selector).
+     */
+    keys?: () => KeySource;
     /**
      * An HTTP client to use instead of the built-in fetch adapter — injected by
      * tests to drive the CLI against a stub. Omitted in production, where a
@@ -123,6 +130,7 @@ interface ConfigFlags {
     prune: boolean;
     force: boolean;
     dropComments: boolean;
+    ignored: boolean;
     page: string;
 }
 
@@ -208,6 +216,12 @@ function runCommand(
         yes: flags.yes,
         err: (t: string) => ctx.streams.stderr.write(t),
         ask: ctx.ask,
+        keys:
+            ctx.keys ??
+            ((): KeySource => {
+                throw new Error("no interactive keyboard input available");
+            }),
+        markNever: (dest: string) => markIgnorePush(deps.fs, dest),
     };
     switch (cmd) {
         case "test":
@@ -223,7 +237,7 @@ function runCommand(
                 flags.dropComments,
             );
         case "status":
-            return runStatus(deps);
+            return runStatus(deps, flags.page, flags.ignored);
         case "gc":
             return runGc(deps, flags.prune);
         case "clean":
@@ -241,7 +255,7 @@ function parseFlags(
     cmd: ConfigCommand,
     args: string[],
 ): ConfigFlags | "help" | "error" {
-    const withPage = cmd === "pull" || cmd === "push";
+    const withPage = cmd === "pull" || cmd === "push" || cmd === "status";
     const withSyncRoot = cmd !== "test";
     // Register only the flags the command documents, so an irrelevant flag
     // (e.g. `gc --yes`, `pull --force`) is rejected rather than silently ignored.
@@ -263,6 +277,9 @@ function parseFlags(
     if (cmd === "gc") {
         options["prune"] = { type: "boolean" };
     }
+    if (cmd === "status") {
+        options["ignored"] = { type: "boolean" };
+    }
     try {
         const { values, positionals } = parseArgs({
             args,
@@ -279,6 +296,7 @@ function parseFlags(
             prune?: boolean;
             force?: boolean;
             "drop-comments"?: boolean;
+            ignored?: boolean;
             help?: boolean;
         };
         if (v.help === true) {
@@ -298,6 +316,7 @@ function parseFlags(
             prune: v.prune === true,
             force: cmd === "push" ? v.force === true : false,
             dropComments: cmd === "push" ? v["drop-comments"] === true : false,
+            ignored: v.ignored === true,
             page: withPage ? (positionals[0] ?? "") : "",
         };
     } catch (err) {
@@ -364,7 +383,7 @@ const USAGE =
     "  test      Verify authenticated access to the Atlassian Site.\n" +
     "  pull      Pull configured pages, folders, and spaces into the cache.\n" +
     "  push      Push edited Markdown back to Confluence.\n" +
-    "  status    List managed pages with newer versions on Confluence.\n" +
+    "  status    Show what a push would send and a pull would bring.\n" +
     "  gc        List orphaned files in the shared _cfsync-media directory.\n" +
     "  clean     Remove local files no longer in Confluence.\n" +
     "  version   Print the program version.\n" +
@@ -392,24 +411,31 @@ const COMMAND_USAGE: Record<ConfigCommand, string> = {
         "\n" +
         "Push edited Markdown back to Confluence. With a [page] argument, push\n" +
         "only that managed page. A new .md file under a folder or space root\n" +
-        "(title but no page_id) is created after you confirm it, restricted to\n" +
-        "you; add --yes to skip the prompt.\n" +
+        "(title but no page_id) is created only when you tick it in a checkbox\n" +
+        "list, restricted to you. Each new note starts unticked: mark it create,\n" +
+        "leave it to be asked about next push, or mark it never (writes\n" +
+        "cfsync-plugin: ignore-push to its frontmatter). Add --yes to create\n" +
+        "every new note without the list.\n" +
         "\nFlags:\n" +
         FLAGS_COMMON +
         "  --yes               Create new pages without asking.\n" +
         "  --force             Repush pages whose ADF changed even if the Markdown did not.\n" +
         "  --drop-comments     Detach open inline comments an edit rewrote, not move them.\n",
     status:
-        "cfsync status — list managed pages with newer versions on Confluence.\n" +
-        "\nUsage:\n  cfsync status [flags]\n" +
+        "cfsync status — show what a push would send and a pull would bring.\n" +
+        "\nUsage:\n  cfsync status [flags] [path]\n" +
         "\n" +
-        "Compare every managed page's local base version against its current\n" +
-        "version on Confluence and list the pages the remote has moved ahead of\n" +
-        "(the pages a pull would bring new content for). Versions are read in one\n" +
-        "bulk request, so the check is cheap. Pages that cannot be checked are\n" +
-        "reported as warnings.\n" +
+        "Report every managed page, like git status, in three sections: To push\n" +
+        "(new notes, notes whose push would change the page, and notes a push\n" +
+        "would refuse, with the reason), To pull (pages Confluence moved ahead of\n" +
+        "the local base), and Diverged (both). A note counts as changed only when\n" +
+        "a push would actually change its page. With [path] — a note or a\n" +
+        "directory under the sync root — report only notes at or under it. A base\n" +
+        "version missing from the cache is fetched and cached. Fails when\n" +
+        "Confluence cannot be reached; exits 0 otherwise, changes pending or not.\n" +
         "\nFlags:\n" +
-        FLAGS_COMMON,
+        FLAGS_COMMON +
+        "  --ignored           Also list notes push never touches (ignore-push).\n",
     gc:
         "cfsync gc — list orphaned files in the shared _cfsync-media directory.\n" +
         "\nUsage:\n  cfsync gc [flags]\n" +

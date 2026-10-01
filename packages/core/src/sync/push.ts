@@ -62,6 +62,7 @@ import {
     canonicalizeImages,
     deleteAttachments,
     type MintLocalId,
+    newImageEdits,
     type UploadedImage,
     uploadNewImages,
 } from "./images.ts";
@@ -960,12 +961,25 @@ export class Pusher {
     }
 }
 
-/** PreflightClass classifies a push candidate against its remote version. */
+/**
+ * PreflightClass classifies a push candidate against its cached base and its
+ * remote version:
+ *
+ * - `new` — no page id; a push would create it.
+ * - `modified` — a push would change the page; the remote has not moved.
+ * - `unchanged` — a push would change nothing; the remote has not moved.
+ * - `remote-moved` — the remote moved ahead of the base; no local change.
+ * - `diverged` — the remote moved ahead and a push would change the page.
+ * - `refused` — a push would be refused; `reason` says why.
+ * - `skip` — the note could not be checked; `reason` says why.
+ */
 export type PreflightClass =
     | "new"
-    | "in-sync"
+    | "modified"
     | "unchanged"
     | "remote-moved"
+    | "diverged"
+    | "refused"
     | "skip";
 
 /** PreflightEntry is one candidate's local/remote version comparison. */
@@ -987,41 +1001,51 @@ export interface PreflightDeps {
     fs: FileSystem;
     yaml: Yaml;
     config: Config;
-    /** Device-local ADF cache dir, holding the `.vN.md` render each note is compared to. */
+    /** Device-local ADF cache dir, holding each note's base `.vN.json` and render. */
     cacheDir: string;
+    /** The Markdown flavor that rendered the notes, used to reconstruct them. */
+    flavor: Flavor;
+    /** The link index, or null to disable link rewriting, exactly as push uses it. */
+    links: LinkIndex | null;
+}
+
+/** PreflightOptions tunes a {@link pushPreflight} run. */
+export interface PreflightOptions {
+    /**
+     * Throw when the bulk remote-version lookup fails, instead of marking every
+     * managed page `skip` — for `status`, which reports nothing when Confluence
+     * cannot be reached.
+     */
+    strict?: boolean;
 }
 
 /**
- * pushPreflight classifies each dest before a push by comparing the note's local
- * base version (`page_version` frontmatter) with the current remote version. A
- * note with no readable frontmatter is `skip`; one with no page id is `new` (it
- * would be created); a readable managed page whose remote version exceeds the
- * local base is `remote-moved` (push will three-way-merge or refuse), else
- * `in-sync`. An `in-sync` page that is byte-identical to the cached render of its
- * base version — no local edit, so a push would PUT nothing — is `unchanged`
- * instead, letting the preview hide it (see {@link unchangedLocally}). A
- * `remote-moved` page keeps that class even when locally unchanged, so `status`
- * still reports it as needing a re-pull. The remote versions come from one bulk
- * {@link
- * ConfluenceClient.fetchPageVersions} call rather than a fetch per page, so a
- * whole preview costs a handful of requests. A page absent from that response
- * (deleted or not visible) is `skip`; a transport failure marks every looked-up
- * page `skip` with the error as the reason — it never throws, so one bad page,
- * or one failed batch, does not sink the preview. Results stay in `dests` order.
+ * pushPreflight classifies each dest before a push (see {@link PreflightClass}).
+ * A note with no readable frontmatter is `skip`; one with no page id is `new`.
+ * For a managed page it asks whether a push would actually change the page (see
+ * {@link localChange}) — not whether the bytes differ — and compares the local
+ * base version (`page_version`) with the current remote version. A base missing
+ * from the cache is fetched from Confluence and cached first. The remote
+ * versions come from one bulk {@link ConfluenceClient.fetchPageVersions} call
+ * rather than a fetch per page, so a whole preview costs a handful of requests.
+ * A page absent from that response (deleted or not visible) is `skip`; a
+ * transport failure marks every looked-up page `skip` with the error as the
+ * reason, or throws when `opts.strict` is set. Otherwise it never throws, so one
+ * bad page does not sink the preview. Results stay in `dests` order.
  */
 export async function pushPreflight(
     deps: PreflightDeps,
     dests: string[],
     cache?: MetaCache,
+    opts: PreflightOptions = {},
 ): Promise<PreflightEntry[]> {
-    const { client, fs, yaml, config, cacheDir } = deps;
+    const { client, fs, yaml, config } = deps;
     const out: (PreflightEntry | null)[] = new Array(dests.length).fill(null);
     const pending: {
         idx: number;
         dest: string;
         name: string;
-        pageId: string;
-        localBase: number;
+        meta: PushMeta;
     }[] = [];
 
     // Read every note's frontmatter first, settling the classes that need no
@@ -1035,13 +1059,7 @@ export async function pushPreflight(
         } else if (meta.pageId === "") {
             out[idx] = entry(dest, name, "", meta.pageVersion, 0, "new", "");
         } else {
-            pending.push({
-                idx,
-                dest,
-                name,
-                pageId: meta.pageId,
-                localBase: meta.pageVersion,
-            });
+            pending.push({ idx, dest, name, meta });
         }
     }
 
@@ -1049,14 +1067,19 @@ export async function pushPreflight(
     // transport failure marks the whole batch skip rather than sinking the view.
     let versions: Map<string, number>;
     try {
-        versions = await client.fetchPageVersions(pending.map((p) => p.pageId));
+        versions = await client.fetchPageVersions(
+            pending.map((p) => p.meta.pageId),
+        );
     } catch (err) {
+        if (opts.strict === true) {
+            throw err;
+        }
         for (const p of pending) {
             out[p.idx] = entry(
                 p.dest,
                 p.name,
                 "",
-                p.localBase,
+                p.meta.pageVersion,
                 0,
                 "skip",
                 message(err),
@@ -1066,43 +1089,165 @@ export async function pushPreflight(
     }
 
     for (const p of pending) {
-        const remote = versions.get(p.pageId);
+        const { pageId, pageVersion } = p.meta;
+        const remote = versions.get(pageId);
         if (remote === undefined) {
             out[p.idx] = entry(
                 p.dest,
                 p.name,
                 "",
-                p.localBase,
+                pageVersion,
                 0,
                 "skip",
                 "page not found on Confluence",
             );
             continue;
         }
-        let cls: PreflightClass =
-            remote > p.localBase ? "remote-moved" : "in-sync";
-        if (
-            cls === "in-sync" &&
-            (await unchangedLocally(fs, cacheDir, p.name, p.localBase, p.dest))
-        ) {
-            cls = "unchanged";
+        const local = await localChange(deps, p.dest, p.name, p.meta);
+        const moved = remote > pageVersion;
+        let cls: PreflightClass;
+        if (local.refusal !== "") {
+            cls = "refused";
+        } else if (local.changed) {
+            cls = moved ? "diverged" : "modified";
+        } else {
+            cls = moved ? "remote-moved" : "unchanged";
         }
-        const resolves =
-            config.comments && cls !== "unchanged"
-                ? await pendingResolves(fs, cacheDir, p.name, p.dest)
-                : [];
         out[p.idx] = entry(
             p.dest,
             p.name,
-            p.pageId,
-            p.localBase,
+            pageId,
+            pageVersion,
             remote,
             cls,
-            "",
-            resolves,
+            local.refusal,
+            local.resolves,
         );
     }
     return out as PreflightEntry[];
+}
+
+/** LocalChange is what a push of a note would do, judged from local state. */
+interface LocalChange {
+    /** A push would update the page or resolve a comment. */
+    changed: boolean;
+    /** Why a push would be refused; empty when it would not be. */
+    refusal: string;
+    /** The comments a push would resolve, as {@link PreflightEntry.resolves}. */
+    resolves: string[];
+}
+
+/**
+ * localChange decides whether pushing the note at `dest` would change its page,
+ * running the same local steps a push does — conflict-marker check, image
+ * detection, comment planning, and the Put lens — without any write to
+ * Confluence. A note byte-identical to its cached base render is unchanged
+ * without reconstructing (the render↔reconstruct round-trip law). Otherwise the
+ * note is changed when it adds an image, would resolve a comment, or
+ * reconstructs to ADF or a title that differ from the cached base. Any error a
+ * push would raise on these steps becomes the `refusal`. A base version missing
+ * from the cache is fetched and cached first ({@link ensureBase}); a failed
+ * fetch is a refusal too, since a push could not run without it.
+ */
+async function localChange(
+    deps: PreflightDeps,
+    dest: string,
+    name: string,
+    meta: PushMeta,
+): Promise<LocalChange> {
+    const { fs, yaml, config, cacheDir, flavor } = deps;
+    const none: LocalChange = { changed: false, refusal: "", resolves: [] };
+    if (await unchangedLocally(fs, cacheDir, name, meta.pageVersion, dest)) {
+        return none;
+    }
+    try {
+        await ensureBase(deps, name, meta);
+        const { body, rawBody, base, bodyLine } = await loadPushInput(
+            fs,
+            yaml,
+            cacheDir,
+            config,
+            dest,
+        );
+        const resolves = config.comments
+            ? planResolves(await readRecord(fs, cacheDir, name), rawBody).map(
+                  describe,
+              )
+            : [];
+        const assets = metaAssets(meta);
+        const images = await newImageEdits(fs, body, assets, dest);
+        if (images.refusal !== "") {
+            return { ...none, refusal: refusalReason(images.refusal, name) };
+        }
+        if (images.pending > 0 || resolves.length > 0) {
+            return { changed: true, refusal: "", resolves };
+        }
+        const next = flavor.reconstruct(base, body, {
+            mentions: meta.mentions,
+            assets,
+            images: [],
+            links: linkMapper(deps.links, dest, config.domain, config.host),
+            force: false,
+            bodyLine,
+        });
+        const changed =
+            JSON.stringify(next.doc) !== JSON.stringify(base.doc) ||
+            meta.title !== base.title;
+        return { changed, refusal: "", resolves };
+    } catch (err) {
+        return { ...none, refusal: refusalReason(message(err), name) };
+    }
+}
+
+/**
+ * refusalReason trims a push error down to its reason for a preflight row,
+ * which already names the page: a leading `push: ` or `<name>: ` is dropped.
+ */
+function refusalReason(msg: string, name: string): string {
+    for (const prefix of ["push: ", `${name}: `]) {
+        if (msg.startsWith(prefix)) {
+            return msg.slice(prefix.length);
+        }
+    }
+    return msg;
+}
+
+/**
+ * ensureBase makes sure the cache holds the base ADF (`.vN.json`) of the note's
+ * recorded version, fetching that version from Confluence and caching it when
+ * it is missing — a fresh clone or a pruned cache — so the note can be compared
+ * against its true base instead of looking changed. Only the ADF is cached: it
+ * is all a push needs, and the base render a pull writes also carries comment
+ * callouts and image assets that only a pull resolves. A note with no recorded
+ * version is left for {@link loadPushInput} to reject.
+ */
+async function ensureBase(
+    deps: PreflightDeps,
+    name: string,
+    meta: PushMeta,
+): Promise<void> {
+    if (meta.pageVersion === 0) {
+        return;
+    }
+    const path = posixJoin(
+        deps.cacheDir,
+        cacheFileName(name, meta.pageVersion),
+    );
+    if (await deps.fs.exists(path)) {
+        return;
+    }
+    const data = await deps.client.fetchPage(meta.pageId, meta.pageVersion);
+    await writePage(deps.fs, path, {
+        name,
+        id: meta.pageId,
+        title: data.title,
+        version: meta.pageVersion,
+        spaceId: data.spaceId !== "" ? data.spaceId : meta.spaceId,
+        parentId: meta.parentId,
+        spaceKey: meta.spaceKey,
+        domain: meta.domain,
+        adf: data.adf,
+    });
 }
 
 /** entry builds a {@link PreflightEntry}; keeps {@link pushPreflight} terse. */
@@ -1126,26 +1271,6 @@ function entry(
         reason,
         resolves,
     };
-}
-
-/**
- * pendingResolves lists the comments a push of the note at `dest` would
- * resolve, from local state alone. A note that would fail on a half-removed
- * comment lists none; the push reports that error.
- */
-async function pendingResolves(
-    fs: FileSystem,
-    cacheDir: string,
-    name: string,
-    dest: string,
-): Promise<string[]> {
-    try {
-        const { body } = splitFrontmatter(await fs.readText(dest));
-        const threads = await readRecord(fs, cacheDir, name);
-        return planResolves(threads, body).map(describe);
-    } catch {
-        return [];
-    }
 }
 
 /**
@@ -1201,10 +1326,10 @@ export async function loadPushInput(
  * cached render of its base `version` — the exact text pull or the last push
  * wrote to both. When they match the note carries no local edit, so a push would
  * reconstruct the baseline and PUT nothing (the render↔reconstruct round-trip
- * law), and preflight can hide it. It compares whole files, so a title or body
- * edit is caught; a missing cache render (fresh clone, pruned cache) or an
- * unreadable note reads as changed, so a note is never wrongly hidden. `name` is
- * the syncRoot-relative page name.
+ * law), and preflight need not reconstruct it. It compares whole files, so a
+ * title or body edit is caught; a missing cache render (fresh clone, pruned
+ * cache) or an unreadable note returns false, leaving the note to the full
+ * {@link localChange} check. `name` is the syncRoot-relative page name.
  */
 async function unchangedLocally(
     fs: FileSystem,

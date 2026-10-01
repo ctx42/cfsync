@@ -7,10 +7,13 @@
 // vault paths), so it unit-tests with the core's MemFS + QueueHttpClient.
 
 import {
+    collectStatus,
     loadLinkIndex,
     MetaCache,
     managedPushDests,
+    markIgnorePush,
     type PageAction,
+    type PreflightDeps,
     type PreflightEntry,
     Puller,
     type PullOutcome,
@@ -25,6 +28,7 @@ import {
     type Reporter,
     resolveFlavor,
     resolvePageSource,
+    type StatusReport,
 } from "@cfsync/core";
 import type { PluginRuntime } from "../runtime.ts";
 
@@ -108,17 +112,42 @@ export async function preflight(
     // once, not twice.
     const cache = new MetaCache();
     const dests = await pushDestsFor(rt, scope, activeDest, cache);
-    return pushPreflight(
-        {
-            client: rt.client,
-            fs: rt.fs,
-            yaml: rt.yaml,
-            config: rt.config,
-            cacheDir: rt.dirs.cacheDir,
-        },
-        dests,
-        cache,
-    );
+    return pushPreflight(await preflightDeps(rt), dests, cache);
+}
+
+/**
+ * vaultStatus reports the two-way status of the whole vault, ignored notes
+ * included (the view toggles them). It throws when Confluence cannot be reached.
+ */
+export async function vaultStatus(rt: PluginRuntime): Promise<StatusReport> {
+    return collectStatus(await preflightDeps(rt), { ignored: true });
+}
+
+/** markNever writes the ignore-push marker into each new note answered "never". */
+export async function markNever(
+    rt: PluginRuntime,
+    dests: string[],
+): Promise<void> {
+    for (const dest of dests) {
+        await markIgnorePush(rt.fs, dest);
+    }
+}
+
+/** preflightDeps assembles the ports a preflight or status run reads. */
+async function preflightDeps(rt: PluginRuntime): Promise<PreflightDeps> {
+    return {
+        client: rt.client,
+        fs: rt.fs,
+        yaml: rt.yaml,
+        config: rt.config,
+        cacheDir: rt.dirs.cacheDir,
+        flavor: resolveFlavor(rt.config.flavor),
+        links: await loadLinkIndex(
+            rt.fs,
+            rt.dirs.linksPath,
+            rt.config.syncRoot,
+        ),
+    };
 }
 
 /** pushSelected pushes exactly the given dests, creating any confirmed new pages. */

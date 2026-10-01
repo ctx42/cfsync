@@ -7,18 +7,31 @@
 // committing. All logic lives in operations.ts / run-state.ts; this file is the
 // DOM shell.
 
-import type { PageAction, PreflightEntry } from "@cfsync/core";
+import {
+    isClean,
+    type PageAction,
+    type PreflightEntry,
+    type StatusReport,
+} from "@cfsync/core";
 import { ItemView, Notice, setIcon, TFile, type WorkspaceLeaf } from "obsidian";
 import type cfsyncPlugin from "../main.ts";
 import { buildRuntime, type PluginRuntime } from "../runtime.ts";
 import {
+    markNever,
     preflight,
     pullNote,
     pullVault,
     pushSelected,
     type Scope,
     toDest,
+    vaultStatus,
 } from "./operations.ts";
+import {
+    type NewChoice,
+    reviewCommit,
+    reviewModel,
+    statusSections,
+} from "./review.ts";
 import {
     PanelReporter,
     type PullTally,
@@ -119,15 +132,15 @@ export class cfsyncView extends ItemView {
             return;
         }
         this.busy = false; // the preview screen is shown; the commit re-guards via run()
-        const pushable = entries.filter((e) => e.cls !== "skip");
-        if (pushable.length === 0) {
+        if (reviewModel(entries).rows.length === 0) {
             new Notice("cfsync: nothing to push");
             this.render(null);
             return;
         }
-        this.renderPreview(entries, (chosen) =>
+        this.renderPreview(entries, (choice) =>
             this.run("pushing", async (rt, reporter) => {
-                const outcome = await pushSelected(rt, reporter, chosen);
+                await markNever(rt, choice.never);
+                const outcome = await pushSelected(rt, reporter, choice.push);
                 for (const e of outcome.errors) reporter.fail(e);
                 reporter.setCounts({
                     ok: outcome.pushed,
@@ -200,6 +213,11 @@ export class cfsyncView extends ItemView {
         this.action(pushGroup, "file-up", "Current note", true, () => {
             this.opScope = "current";
             void this.runPush();
+        });
+
+        const statusGroup = this.group(root, "Status");
+        this.action(statusGroup, "list-checks", "Check vault", false, () => {
+            void this.runStatus();
         });
 
         if (state === null) {
@@ -321,6 +339,25 @@ export class cfsyncView extends ItemView {
         el.createSpan({ text: text.slice(at + name.length) });
     }
 
+    /** linkNote renders a page name as a link opening its vault note, or as
+     * plain text when no such note exists. */
+    private linkNote(el: HTMLElement, name: string): void {
+        const file = this.noteFor(name);
+        if (file === null) {
+            el.setText(name);
+            return;
+        }
+        const link = el.createEl("a", {
+            cls: "cfsync-row-file",
+            text: name,
+            href: "#",
+        });
+        link.onclick = (e) => {
+            e.preventDefault();
+            void this.app.workspace.getLeaf(false).openFile(file);
+        };
+    }
+
     /** noteFor resolves a syncRoot-relative page name to its vault note, or null
      * when no such file exists (e.g. a deleted page or an unresolvable name). */
     private noteFor(name: string): TFile | null {
@@ -343,10 +380,12 @@ export class cfsyncView extends ItemView {
         });
     }
 
-    /** renderPreview shows one selectable row per candidate before a push. */
+    /** renderPreview shows one row per candidate before a push: a checkbox for
+     * an edited note, a later/create/never choice for a new one, and a locked row
+     * for one a push would refuse or could not check. */
     private renderPreview(
         entries: PreflightEntry[],
-        commit: (chosen: string[]) => Promise<void>,
+        commit: (choice: { push: string[]; never: string[] }) => Promise<void>,
     ): void {
         const root = this.contentEl;
         root.empty();
@@ -355,40 +394,57 @@ export class cfsyncView extends ItemView {
         this.previewPending = true;
 
         this.renderTitle(root, "arrow-up", "Review push");
-        // An unchanged note would push nothing, so it is hidden from the review
-        // rather than listed and auto-skipped; its tally still reports the count.
-        const shown = entries.filter((e) => e.cls !== "unchanged");
-        const unchanged = entries.length - shown.length;
-        const pushable = shown.filter((e) => e.cls !== "skip");
+        // A note whose push would change nothing is hidden rather than listed and
+        // auto-skipped; the sub-line still reports how many.
+        const { rows, hidden } = reviewModel(entries);
+        const ready = rows.filter((r) => r.control !== "locked").length;
+        const plural = rows.length === 1 ? "" : "s";
+        const extra = hidden > 0 ? ` · ${hidden} unchanged` : "";
         root.createDiv({
             cls: "cfsync-sub",
-            text:
-                `${pushable.length} of ${shown.length} note${
-                    shown.length === 1 ? "" : "s"
-                } ready to push` +
-                (unchanged > 0 ? ` · ${unchanged} unchanged` : ""),
+            text: `${ready} of ${rows.length} note${plural} ready to push${extra}`,
         });
 
-        const chosen = new Set(pushable.map((e) => e.dest));
+        const picked = new Set(
+            rows.filter((r) => r.control === "pick").map((r) => r.entry.dest),
+        );
+        const answers = new Map<string, NewChoice>();
         const list = root.createDiv({ cls: "cfsync-preview" });
-        for (const e of shown) {
-            const row = list.createEl("label", {
-                cls: `cfsync-prow cfsync-${chipKind(e)}`,
+        for (const r of rows) {
+            const e = r.entry;
+            const row = list.createEl(r.control === "new" ? "div" : "label", {
+                cls: `cfsync-prow cfsync-${r.kind}`,
             });
-            const box = row.createEl("input", { type: "checkbox" });
-            box.checked = chosen.has(e.dest);
-            box.disabled = e.cls === "skip";
-            box.onchange = () => {
-                if (box.checked) chosen.add(e.dest);
-                else chosen.delete(e.dest);
-            };
+            if (r.control === "new") {
+                const sel = row.createEl("select", { cls: "cfsync-prow-new" });
+                const opts: Array<[NewChoice, string]> = [
+                    ["later", "Ask later"],
+                    ["create", "Create"],
+                    ["never", "Never push"],
+                ];
+                for (const [value, text] of opts) {
+                    sel.createEl("option", { value, text });
+                }
+                sel.value = "later";
+                sel.onchange = () => {
+                    answers.set(e.dest, sel.value as NewChoice);
+                };
+            } else {
+                const box = row.createEl("input", { type: "checkbox" });
+                box.checked = picked.has(e.dest);
+                box.disabled = r.control === "locked";
+                box.onchange = () => {
+                    if (box.checked) picked.add(e.dest);
+                    else picked.delete(e.dest);
+                };
+            }
             const main = row.createDiv({ cls: "cfsync-prow-main" });
             main.createDiv({ cls: "cfsync-prow-name", text: e.name });
-            main.createDiv({ cls: "cfsync-prow-note", text: versionNote(e) });
-            for (const r of e.resolves) {
+            main.createDiv({ cls: "cfsync-prow-note", text: r.note });
+            for (const c of e.resolves) {
                 main.createDiv({
                     cls: "cfsync-prow-note",
-                    text: `resolves comment ${r}`,
+                    text: `resolves comment ${c}`,
                 });
             }
         }
@@ -400,7 +456,7 @@ export class cfsyncView extends ItemView {
         });
         go.onclick = () => {
             this.previewPending = false;
-            void commit([...chosen]);
+            void commit(reviewCommit(picked, answers));
         };
         const cancel = actions.createEl("button", {
             cls: "cfsync-action",
@@ -410,6 +466,84 @@ export class cfsyncView extends ItemView {
             this.previewPending = false;
             this.render(null);
         };
+    }
+
+    /** runStatus checks the whole vault's two-way status and shows it. */
+    async runStatus(): Promise<void> {
+        if (this.refusePending()) return;
+        if (this.busy) return;
+        this.busy = true;
+        this.render(null); // disable the header buttons during the check
+        let report: StatusReport;
+        try {
+            const rt = buildRuntime(
+                this.app,
+                this.plugin.settings,
+                this.plugin.token,
+            );
+            report = await vaultStatus(rt);
+        } catch (err) {
+            new Notice(`cfsync: ${message(err)}`);
+            this.busy = false;
+            this.render(null);
+            return;
+        }
+        this.busy = false;
+        this.renderStatus(report, false);
+    }
+
+    /** renderStatus draws a status report as collapsible sections, read-only;
+     * the "show ignored" toggle redraws it with the ignored notes listed. */
+    private renderStatus(report: StatusReport, showIgnored: boolean): void {
+        const root = this.contentEl;
+        root.empty();
+        root.addClass("cfsync-panel");
+        this.renderTitle(root, "list-checks", "Status");
+
+        const sections = statusSections(
+            report,
+            this.plugin.settings.syncRoot,
+            showIgnored,
+        );
+        root.createDiv({
+            cls: "cfsync-sub",
+            text: isClean(report)
+                ? "Everything up to date"
+                : `${report.push.length} to push · ${report.pull.length} to ` +
+                  `pull · ${report.diverged.length} diverged`,
+        });
+
+        const toggle = root.createEl("label", { cls: "cfsync-status-toggle" });
+        const box = toggle.createEl("input", { type: "checkbox" });
+        box.checked = showIgnored;
+        box.onchange = () => this.renderStatus(report, box.checked);
+        toggle.createSpan({
+            text: ` Show ignored (${report.ignored.length})`,
+        });
+
+        for (const s of sections) {
+            const det = root.createEl("details", { cls: "cfsync-status" });
+            det.open = true;
+            det.createEl("summary", {
+                text: `${s.title} (${s.lines.length})`,
+            });
+            const log = det.createDiv({ cls: "cfsync-log" });
+            for (const l of s.lines) {
+                const r = log.createDiv({ cls: "cfsync-row" });
+                r.createSpan({ cls: "cfsync-status-word", text: l.word });
+                this.linkNote(r.createSpan({ cls: "cfsync-row-text" }), l.name);
+                if (l.detail !== "") {
+                    r.createSpan({ cls: "cfsync-prow-note", text: l.detail });
+                }
+            }
+        }
+
+        const actions = root.createDiv({ cls: "cfsync-preview-actions" });
+        const back = actions.createEl("button", {
+            cls: "cfsync-action",
+            text: "Back",
+        });
+        back.onclick = () => this.render(null);
     }
 
     /** refusePending blocks a new run while a push preview is open, nudging the
@@ -475,22 +609,6 @@ function singleTally(action: PageAction): PullTally {
         conflict: action === "conflict" ? 1 : 0,
         deleted: 0,
     };
-}
-
-/** chipKind maps a preflight class to a row style. */
-function chipKind(e: PreflightEntry): string {
-    if (e.cls === "remote-moved") return "warn";
-    if (e.cls === "skip") return "err";
-    return "info";
-}
-
-/** versionNote renders the base→remote version delta for a preview row. */
-function versionNote(e: PreflightEntry): string {
-    if (e.cls === "new") return "(new — will be created)";
-    if (e.cls === "skip") return `(skipped — ${e.reason})`;
-    if (e.cls === "remote-moved")
-        return `⚠ based on v${e.localBase} → remote v${e.remoteVersion}`;
-    return `v${e.localBase}`;
 }
 
 /** message returns an unknown thrown value's message. */

@@ -633,11 +633,13 @@ describe("pushPreflight resolves", () => {
                 yaml,
                 config,
                 cacheDir: "/data/cache",
+                flavor: obsidianFlavor,
+                links: null,
             },
             ["/vault/p.md"],
         );
 
-        expect(have[0]?.cls).toBe("in-sync");
+        expect(have[0]?.cls).toBe("modified");
         expect(have[0]?.resolves).toEqual(['id:C1 "data type"']);
     });
 });

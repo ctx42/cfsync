@@ -6,7 +6,13 @@
 // so a whole command runs — flag parsing, config + env loading, dep assembly,
 // orchestration, and output routing — without touching the network or disk.
 
-import type { Clock, HttpClient, Streams } from "@cfsync/core";
+import {
+    type Clock,
+    type HttpClient,
+    newADF,
+    obsidianFlavor,
+    type Streams,
+} from "@cfsync/core";
 import { describe, expect, it } from "vitest";
 import { parse as parseYaml } from "yaml";
 import { StubHttpClient } from "../../core/test/support/http-stub.ts";
@@ -207,7 +213,7 @@ describe("offline commands", () => {
         expect(streams.errText()).toContain("accepts at most one page");
     });
 
-    it("status reports no pages to check with no managed pages", async () => {
+    it("status reports everything up to date with no managed pages", async () => {
         const fs = await withConfig("pages: {}\n");
         const { ctx, streams } = ctxFor(
             ["status", ...CONFIG_ARG],
@@ -215,16 +221,54 @@ describe("offline commands", () => {
             secretsEnv("/w"),
         );
         expect(await main(ctx)).toBe(EXIT_OK);
-        expect(streams.outText()).toBe("cfsync: no pages to check\n");
+        expect(streams.outText()).toBe("cfsync: everything up to date\n");
     });
 });
 
 describe("status command", () => {
-    /** note is a managed .md file with a page id and base version. */
-    const note = (pageId: string, version: number): string =>
-        "---\n" +
-        `title: P\npage_id: "${pageId}"\npage_version: ${version}\n` +
-        "cfsync-plugin: pull\n---\nbody\n";
+    const adfDoc = {
+        version: 1,
+        type: "doc",
+        content: [
+            {
+                type: "paragraph",
+                attrs: { localId: "p1" },
+                content: [{ type: "text", text: "Body text." }],
+            },
+        ],
+    };
+
+    /**
+     * pulled seeds `/w/<name>` and its cached base as a pull at `version` would;
+     * with `edit` the note's text is then changed so a push would update it.
+     */
+    async function pulled(
+        fs: MemFS,
+        name: string,
+        id: string,
+        version: number,
+        edit = false,
+    ): Promise<void> {
+        const json = JSON.stringify({
+            name,
+            id,
+            title: "P",
+            version,
+            space_id: "9",
+            adf: adfDoc,
+        });
+        const md = obsidianFlavor.render(newADF(json), {
+            assets: {},
+            links: null,
+        })[0];
+        const base = `/w/.adf_cache/${name.slice(0, -".md".length)}`;
+        await fs.write(`${base}.v${version}.json`, json);
+        await fs.write(`${base}.v${version}.md`, md);
+        await fs.write(
+            `/w/${name}`,
+            edit ? md.replace("Body text.", "Edited text.") : md,
+        );
+    }
 
     /** bulk is one fetchPageVersions response for the given id/version pairs. */
     const bulk = (...pairs: Array<[string, number]>): string =>
@@ -233,49 +277,44 @@ describe("status command", () => {
             _links: {},
         });
 
-    async function vaultWith(
-        ...notes: Array<[string, string]>
-    ): Promise<MemFS> {
-        const fs = await withConfig('folders:\n  wiki: "/wiki/spaces/T"\n');
-        for (const [path, body] of notes) {
-            await fs.write(path, body);
-        }
-        return fs;
-    }
+    const bulkURL = (...ids: string[]): string =>
+        `${HOST}/wiki/api/v2/pages?${ids.map((id) => `id=${id}`).join("&")}&limit=250`;
 
-    it("lists the pages whose remote version moved ahead", async () => {
-        const fs = await vaultWith(
-            ["/w/wiki/A.md", note("101", 5)],
-            ["/w/wiki/B.md", note("102", 5)],
-        );
-        const http = new StubHttpClient().on(
-            "GET",
-            `${HOST}/wiki/api/v2/pages?id=101&id=102&limit=250`,
-            { body: bulk(["101", 5], ["102", 7]) },
-        );
-        const { ctx, streams } = ctxFor(
-            ["status", ...CONFIG_ARG],
-            fs,
-            secretsEnv("/w"),
-            http,
-        );
+    const vault = (): Promise<MemFS> =>
+        withConfig('folders:\n  wiki: "/wiki/spaces/T"\n');
 
-        expect(await main(ctx)).toBe(EXIT_OK);
-        const out = streams.outText();
-        expect(out).toContain(
-            "cfsync: 1 of 2 pages have newer versions on Confluence",
+    it("reports push, pull, and diverged sections like git status", async () => {
+        const fs = await vault();
+        await pulled(fs, "wiki/Same.md", "1", 5);
+        await pulled(fs, "wiki/Edited.md", "2", 5, true);
+        await pulled(fs, "wiki/Behind.md", "3", 12);
+        await pulled(fs, "wiki/Both.md", "4", 7, true);
+        await fs.write(
+            "/w/wiki/Broken.md",
+            '---\ntitle: X\npage_id: "5"\npage_version: 2\n---\n' +
+                "<<<<<<< local\na\n=======\nb\n>>>>>>> remote\n",
         );
-        expect(out).toContain("local v5 -> remote v7");
-        expect(http.requests.length).toBe(1); // one bulk call for both pages
-    });
-
-    it("reports all up to date when no remote version moved", async () => {
-        const fs = await vaultWith(["/w/wiki/A.md", note("101", 5)]);
-        const http = new StubHttpClient().on(
-            "GET",
-            `${HOST}/wiki/api/v2/pages?id=101&limit=250`,
-            { body: bulk(["101", 5]) },
+        await fs.write("/w/wiki/New.md", "---\ntitle: New\n---\nx\n");
+        await fs.write(
+            "/w/wiki/Mine.md",
+            "---\ntitle: Mine\ncfsync-plugin: ignore-push\n---\nx\n",
         );
+        const http = new StubHttpClient()
+            .on("GET", bulkURL("3", "4", "5", "2", "1"), {
+                body: bulk(["1", 5], ["2", 5], ["3", 14], ["4", 9], ["5", 2]),
+            })
+            .on(
+                "GET",
+                `${HOST}/wiki/api/v2/pages/5?body-format=atlas_doc_format&version=2`,
+                {
+                    body: JSON.stringify({
+                        id: "5",
+                        title: "X",
+                        version: { number: 2 },
+                        body: { atlas_doc_format: { value: '{"type":"doc"}' } },
+                    }),
+                },
+            );
         const { ctx, streams } = ctxFor(
             ["status", ...CONFIG_ARG],
             fs,
@@ -285,18 +324,70 @@ describe("status command", () => {
 
         expect(await main(ctx)).toBe(EXIT_OK);
         expect(streams.outText()).toBe(
-            "cfsync: all managed pages are up to date\n",
+            "To push (3):\n" +
+                "  refused   wiki/Broken.md  (unresolved conflict markers; " +
+                "resolve them before pushing)\n" +
+                "  modified  wiki/Edited.md\n" +
+                "  new       wiki/New.md\n" +
+                "\n" +
+                "To pull (1):\n" +
+                "  remote    wiki/Behind.md  local v12 -> remote v14\n" +
+                "\n" +
+                "Diverged (1):\n" +
+                "  diverged  wiki/Both.md    local v7 -> remote v9, local edits\n",
         );
     });
 
-    it("warns about a page it could not check", async () => {
-        const fs = await vaultWith(["/w/wiki/A.md", note("101", 5)]);
-        // The bulk response omits id 101 (deleted or not visible).
-        const http = new StubHttpClient().on(
-            "GET",
-            `${HOST}/wiki/api/v2/pages?id=101&limit=250`,
-            { body: bulk() },
+    it("lists ignored notes with --ignored", async () => {
+        const fs = await vault();
+        await pulled(fs, "wiki/Same.md", "1", 5);
+        await fs.write(
+            "/w/wiki/Mine.md",
+            "---\ntitle: Mine\ncfsync-plugin: ignore-push\n---\nx\n",
         );
+        const http = new StubHttpClient().on("GET", bulkURL("1"), {
+            body: bulk(["1", 5]),
+        });
+        const { ctx, streams } = ctxFor(
+            ["status", "--ignored", ...CONFIG_ARG],
+            fs,
+            secretsEnv("/w"),
+            http,
+        );
+
+        expect(await main(ctx)).toBe(EXIT_OK);
+        expect(streams.outText()).toBe(
+            "Ignored (1):\n  ignored  wiki/Mine.md\n\n" +
+                "cfsync: everything up to date\n",
+        );
+    });
+
+    it("reports only the notes under a path argument", async () => {
+        const fs = await vault();
+        await pulled(fs, "wiki/a/One.md", "1", 5, true);
+        await pulled(fs, "wiki/b/Two.md", "2", 5, true);
+        const http = new StubHttpClient().on("GET", bulkURL("1"), {
+            body: bulk(["1", 5]),
+        });
+        const { ctx, streams } = ctxFor(
+            ["status", "wiki/a", ...CONFIG_ARG],
+            fs,
+            secretsEnv("/w"),
+            http,
+        );
+
+        expect(await main(ctx)).toBe(EXIT_OK);
+        expect(streams.outText()).toBe(
+            "To push (1):\n  modified  wiki/a/One.md\n",
+        );
+    });
+
+    it("reports everything up to date when nothing is pending", async () => {
+        const fs = await vault();
+        await pulled(fs, "wiki/Same.md", "1", 5);
+        const http = new StubHttpClient().on("GET", bulkURL("1"), {
+            body: bulk(["1", 5]),
+        });
         const { ctx, streams } = ctxFor(
             ["status", ...CONFIG_ARG],
             fs,
@@ -305,9 +396,46 @@ describe("status command", () => {
         );
 
         expect(await main(ctx)).toBe(EXIT_OK);
-        const out = streams.outText();
-        expect(out).toContain("warning:");
-        expect(out).toContain("could not check");
-        expect(out).toContain("cfsync: all managed pages are up to date");
+        expect(streams.outText()).toBe("cfsync: everything up to date\n");
+    });
+
+    it("warns about a page it could not check", async () => {
+        const fs = await vault();
+        await pulled(fs, "wiki/A.md", "1", 5);
+        // The bulk response omits id 1 (deleted or not visible).
+        const http = new StubHttpClient().on("GET", bulkURL("1"), {
+            body: bulk(),
+        });
+        const { ctx, streams } = ctxFor(
+            ["status", ...CONFIG_ARG],
+            fs,
+            secretsEnv("/w"),
+            http,
+        );
+
+        expect(await main(ctx)).toBe(EXIT_OK);
+        expect(streams.outText()).toBe(
+            "cfsync: nothing to push or pull among the checked pages\n\n" +
+                "warning: wiki/A.md: could not check " +
+                "(page not found on Confluence)\n",
+        );
+    });
+
+    it("fails without a report when Confluence cannot be reached", async () => {
+        const fs = await vault();
+        await pulled(fs, "wiki/A.md", "1", 5, true);
+        const http = new StubHttpClient().on("GET", bulkURL("1"), {
+            status: 503,
+        });
+        const { ctx, streams } = ctxFor(
+            ["status", ...CONFIG_ARG],
+            fs,
+            secretsEnv("/w"),
+            http,
+        );
+
+        expect(await main(ctx)).toBe(EXIT_ERR);
+        expect(streams.outText()).toBe("");
+        expect(streams.errText()).toContain("checking status");
     });
 });

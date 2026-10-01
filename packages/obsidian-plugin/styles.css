@@ -435,3 +435,30 @@
     display: flex;
     gap: var(--size-4-2);
 }
+
+/* Push preview: a new note's later/create/never choice sits where an edited
+   note's checkbox would. */
+.cfsync-prow-new {
+    flex: 0 0 auto;
+    font-size: var(--font-ui-smaller);
+}
+
+/* Status view: read-only collapsible sections mirroring `cfsync status`. */
+.cfsync-status-toggle {
+    display: flex;
+    align-items: center;
+    font-size: var(--font-ui-smaller);
+    color: var(--text-muted);
+    cursor: pointer;
+}
+.cfsync-status > summary {
+    cursor: pointer;
+    font-weight: var(--font-medium);
+    padding: var(--size-2-3) 0;
+}
+.cfsync-status-word {
+    flex: 0 0 5.5em;
+    font-family: var(--font-monospace);
+    font-size: var(--font-ui-smaller);
+    color: var(--text-muted);
+}

@@ -64,10 +64,7 @@ export async function uploadNewImages(
 ): Promise<{ images: NewImage[]; uploaded: UploadedImage[] }> {
     const inline = await detectInlineNewImages(fs, body, assets, dest);
     if (inline[0] !== undefined) {
-        throw new Error(
-            `push: inline image "${inline[0]}" is not supported; put the ` +
-                "image on its own line to upload it",
-        );
+        throw new Error(inlineRefusal(inline[0]));
     }
     const pending = await detectNewImages(fs, body, assets, dest);
     if (pending.length === 0) {
@@ -103,6 +100,34 @@ export async function uploadNewImages(
         assets[up.localId] = p.target;
     }
     return { images, uploaded };
+}
+
+/**
+ * newImageEdits reports, without network I/O, how a push of `body` would treat
+ * user-added local images: `refusal` is the error {@link uploadNewImages} would
+ * throw for an inline image (empty when none), and `pending` counts the
+ * own-line images it would upload. Preflight uses it to classify a note.
+ */
+export async function newImageEdits(
+    fs: FileSystem,
+    body: string,
+    assets: Record<string, string>,
+    dest: string,
+): Promise<{ refusal: string; pending: number }> {
+    const inline = await detectInlineNewImages(fs, body, assets, dest);
+    if (inline[0] !== undefined) {
+        return { refusal: inlineRefusal(inline[0]), pending: 0 };
+    }
+    const pending = await detectNewImages(fs, body, assets, dest);
+    return { refusal: "", pending: pending.length };
+}
+
+/** inlineRefusal is the error for an inline image a push cannot upload. */
+function inlineRefusal(target: string): string {
+    return (
+        `push: inline image "${target}" is not supported; put the ` +
+        "image on its own line to upload it"
+    );
 }
 
 /**

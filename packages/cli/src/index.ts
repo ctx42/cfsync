@@ -16,6 +16,7 @@ import { NodeFS } from "./adapters/fs.ts";
 import { nodeStreams } from "./adapters/streams.ts";
 import { EXIT_ERR, main } from "./main.ts";
 import { nodeAsk } from "./prompt.ts";
+import { nodeKeys } from "./select.ts";
 
 main({
     argv: process.argv.slice(2),
@@ -29,6 +30,7 @@ main({
     isTTY: Boolean(process.stderr.isTTY),
     stdinIsTTY: Boolean(process.stdin.isTTY),
     ask: nodeAsk,
+    keys: nodeKeys,
 })
     .then((code) => {
         // Set the exit code instead of calling process.exit(): an abrupt exit

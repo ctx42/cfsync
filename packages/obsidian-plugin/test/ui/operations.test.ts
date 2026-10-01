@@ -8,7 +8,12 @@ import { QueueHttpClient } from "../../../core/test/support/http-queue.ts";
 import { MemFS } from "../../../core/test/support/memfs.ts";
 import type { PluginRuntime } from "../../src/runtime.ts";
 import { runtimeDirs } from "../../src/runtime-dirs.ts";
-import { preflight, toDest } from "../../src/ui/operations.ts";
+import {
+    markNever,
+    preflight,
+    toDest,
+    vaultStatus,
+} from "../../src/ui/operations.ts";
 
 /** versionsJson is one bulk fetchPageVersions response for the given id/version. */
 function versionsJson(id: string, version: number): string {
@@ -53,6 +58,8 @@ describe("operations", () => {
         await fs.write("wiki/A.md", note("1", 3));
         const http = new QueueHttpClient().rsp(200, versionsJson("1", 9));
         const rt = await runtime(http, fs);
+        // The note matches its cached base render: no local change.
+        await fs.write(`${rt.dirs.cacheDir}/wiki/A.v3.md`, note("1", 3));
         const out = await preflight(rt, "current", "wiki/A.md");
         expect(out).toHaveLength(1);
         expect(out[0]?.cls).toBe("remote-moved");
@@ -65,5 +72,33 @@ describe("operations", () => {
         await expect(
             preflight(rt, "current", "not/managed.md"),
         ).rejects.toThrow(/managed/);
+    });
+
+    it("markNever writes the ignore-push marker into each note", async () => {
+        const fs = new MemFS();
+        await fs.write("wiki/N.md", "---\ntitle: N\n---\nx\n");
+        const rt = await runtime(new QueueHttpClient(), fs);
+
+        await markNever(rt, ["wiki/N.md"]);
+
+        expect(await fs.readText("wiki/N.md")).toContain(
+            "cfsync-plugin: ignore-push",
+        );
+    });
+
+    it("vaultStatus reports the vault and fails when Confluence is down", async () => {
+        const fs = new MemFS();
+        await fs.write("wiki/A.md", note("1", 3));
+        const up = await runtime(
+            new QueueHttpClient().rsp(200, versionsJson("1", 9)),
+            fs,
+        );
+        await fs.write(`${up.dirs.cacheDir}/wiki/A.v3.md`, note("1", 3));
+
+        const have = await vaultStatus(up);
+
+        expect(have.pull.map((e) => e.name)).toEqual(["wiki/A.md"]);
+        const down = await runtime(new QueueHttpClient().rsp(503), fs);
+        await expect(vaultStatus(down)).rejects.toThrow("503");
     });
 });

@@ -15,8 +15,10 @@ import {
     type ConfluenceClient,
     type CreateInput,
     collectGarbage,
+    collectStatus,
     type FileSystem,
     findStale,
+    isClean,
     loadLinkIndex,
     MetaCache,
     managedPushDests,
@@ -29,7 +31,6 @@ import {
     planCreates,
     pullConfig,
     pullSummary,
-    pushPreflight,
     type Reporter,
     readPageMeta,
     removeStale,
@@ -37,6 +38,8 @@ import {
     resolvePagePath,
     resolvePageSource,
     type StaleItem,
+    type StatusOptions,
+    type StatusReport,
     type Yaml,
 } from "@cfsync/core";
 import type { RuntimeDirs } from "./config-load.ts";
@@ -226,57 +229,152 @@ export async function runPush(
 }
 
 /**
- * runStatus lists the managed pages whose Confluence version has moved ahead of
- * the local base — the pages a later pull would bring new content for. It reads
- * every managed note's base version and compares it against the current remote
- * version in one bulk lookup (via {@link pushPreflight}); pages it could not
- * check (unreadable notes, or pages missing/forbidden on the Site) are reported
- * as warnings, never as false "up to date" results.
+ * runStatus reports the two-way status of the managed notes, like `git status`:
+ * the notes a push would send (new, modified, or refused), the notes a pull
+ * would bring new content for, and the notes changed on both sides (see
+ * {@link collectStatus}). With `selected` it reports only the note or directory
+ * at that path; with `ignored` it also lists the notes push never touches. It
+ * fails, reporting nothing, when Confluence cannot be reached.
  */
-export async function runStatus(d: CliDeps): Promise<CommandResult> {
-    // One frontmatter cache spans discovery and preflight, so each managed note
-    // is read once rather than twice.
-    const cache = new MetaCache();
-    const dests = await managedPushDests(d.fs, d.yaml, d.config, cache);
-    if (dests.length === 0) {
-        return { out: "cfsync: no pages to check\n", error: null };
+export async function runStatus(
+    d: CliDeps,
+    selected: string,
+    ignored: boolean,
+): Promise<CommandResult> {
+    const opts: StatusOptions = { ignored };
+    if (selected !== "") {
+        opts.scope = resolvePagePath(d.config.syncRoot, selected);
     }
-    const entries = await pushPreflight(
-        {
-            client: d.client,
-            fs: d.fs,
-            yaml: d.yaml,
-            config: d.config,
-            cacheDir: d.dirs.cacheDir,
-        },
-        dests,
-        cache,
-    );
-    return { out: statusReport(entries), error: null };
+    let report: StatusReport;
+    try {
+        report = await collectStatus(
+            {
+                client: d.client,
+                fs: d.fs,
+                yaml: d.yaml,
+                config: d.config,
+                cacheDir: d.dirs.cacheDir,
+                flavor: resolveFlavor(d.config.flavor),
+                links: await loadLinkIndex(
+                    d.fs,
+                    d.dirs.linksPath,
+                    d.config.syncRoot,
+                ),
+            },
+            opts,
+        );
+    } catch (err) {
+        return {
+            out: "",
+            error: new Error(
+                `checking status: ${err instanceof Error ? err.message : String(err)}`,
+            ),
+        };
+    }
+    return { out: statusReport(report, d.config.syncRoot), error: null };
+}
+
+/** StatusRow is one rendered `status` line: its status word, page, and detail. */
+interface StatusRow {
+    word: string;
+    name: string;
+    detail: string;
 }
 
 /**
- * statusReport renders a preflight into the `status` output: a `warning:` line
- * per page that could not be checked, then a headline count and one indented
- * `local vX -> remote vY` line per page whose remote version moved ahead.
+ * statusReport renders a {@link StatusReport}: one headed section per non-empty
+ * group (To push, To pull, Diverged, Ignored), each row a status word, the page
+ * path, and its detail, with the path column aligned across all sections; then a
+ * `warning:` line per page that could not be checked. With nothing pending it
+ * says so instead of printing sections.
  */
-function statusReport(entries: PreflightEntry[]): string {
-    const moved = entries.filter((e) => e.cls === "remote-moved");
-    const skipped = entries.filter((e) => e.cls === "skip");
+function statusReport(r: StatusReport, syncRoot: string): string {
+    const versions = (e: PreflightEntry): string =>
+        `local v${e.localBase} -> remote v${e.remoteVersion}`;
+    const sections: Array<[string, StatusRow[]]> = [
+        [
+            "To push",
+            r.push.map((e) => ({
+                word: e.cls,
+                name: e.name,
+                detail: e.cls === "refused" ? `(${firstLine(e.reason)})` : "",
+            })),
+        ],
+        [
+            "To pull",
+            r.pull.map((e) => ({
+                word: "remote",
+                name: e.name,
+                detail: versions(e),
+            })),
+        ],
+        [
+            "Diverged",
+            r.diverged.map((e) => ({
+                word: "diverged",
+                name: e.name,
+                detail: `${versions(e)}, local edits`,
+            })),
+        ],
+        [
+            "Ignored",
+            r.ignored.map((dest) => ({
+                word: "ignored",
+                name: pageName(syncRoot, dest),
+                detail: "",
+            })),
+        ],
+    ];
+    const rows = sections.flatMap(([, s]) => s);
+    const wordWidth = Math.max(0, ...rows.map((row) => row.word.length)) + 2;
+    // Align details on the longest name up to NAME_CAP; a longer name keeps a
+    // two-space gap, so one deep path does not push every detail off-screen.
+    const fitting = rows
+        .filter((row) => row.detail !== "" && row.name.length <= NAME_CAP)
+        .map((row) => row.name.length);
+    const nameWidth = Math.max(0, ...fitting) + 2;
 
-    let out = skipped
+    const parts: string[] = [];
+    for (const [title, section] of sections) {
+        if (section.length === 0) {
+            continue;
+        }
+        let out = `${title} (${section.length}):\n`;
+        for (const row of section) {
+            const line =
+                row.detail === ""
+                    ? `  ${row.word.padEnd(wordWidth)}${row.name}`
+                    : `  ${row.word.padEnd(wordWidth)}` +
+                      `${padName(row.name, nameWidth)}${row.detail}`;
+            out += `${line}\n`;
+        }
+        parts.push(out);
+    }
+    const warnings = r.warnings
         .map((e) => `warning: ${e.name}: could not check (${e.reason})\n`)
         .join("");
-    if (moved.length === 0) {
-        return `${out}cfsync: all managed pages are up to date\n`;
+    if (isClean(r)) {
+        const clean =
+            r.warnings.length === 0
+                ? "cfsync: everything up to date\n"
+                : "cfsync: nothing to push or pull among the checked pages\n";
+        parts.push(clean);
     }
-    out +=
-        `cfsync: ${moved.length} of ${entries.length} pages have newer ` +
-        "versions on Confluence\n";
-    for (const e of moved) {
-        out += `  ${e.name}  local v${e.localBase} -> remote v${e.remoteVersion}\n`;
-    }
-    return out;
+    return parts.join("\n") + (warnings === "" ? "" : `\n${warnings}`);
+}
+
+/** NAME_CAP is the longest page name `status` aligns details after. */
+const NAME_CAP = 60;
+
+/** padName pads `name` to `width`, keeping at least a two-space gap. */
+function padName(name: string, width: number): string {
+    return name.length + 2 > width ? `${name}  ` : name.padEnd(width);
+}
+
+/** firstLine is the first line of a possibly multi-line message. */
+function firstLine(s: string): string {
+    const nl = s.indexOf("\n");
+    return nl < 0 ? s : s.slice(0, nl);
 }
 
 /**

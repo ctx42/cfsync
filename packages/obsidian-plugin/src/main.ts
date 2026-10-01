@@ -82,6 +82,12 @@ export default class cfsyncPlugin extends Plugin {
                 }),
         });
 
+        this.addCommand({
+            id: "cfsync-status",
+            name: "Status (whole vault)",
+            callback: () => void this.runInView((v) => v.runStatus()),
+        });
+
         console.log(`cfsync: loaded (core=${PACKAGE_NAME})`);
     }
 
