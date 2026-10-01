@@ -31,6 +31,7 @@ import {
     reviewCommit,
     reviewModel,
     statusSections,
+    statusText,
 } from "./review.ts";
 import {
     PanelReporter,
@@ -539,6 +540,19 @@ export class cfsyncView extends ItemView {
         }
 
         const actions = root.createDiv({ cls: "cfsync-preview-actions" });
+        if (sections.length > 0) {
+            const copy = actions.createEl("button", {
+                cls: "cfsync-action",
+                text: "Copy report",
+            });
+            copy.onclick = () => {
+                navigator.clipboard.writeText(statusText(sections)).then(
+                    () => new Notice("cfsync: status report copied"),
+                    (err: unknown) =>
+                        new Notice(`cfsync: copy failed: ${message(err)}`),
+                );
+            };
+        }
         const back = actions.createEl("button", {
             cls: "cfsync-action",
             text: "Back",

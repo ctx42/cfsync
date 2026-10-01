@@ -462,3 +462,10 @@
     font-size: var(--font-ui-smaller);
     color: var(--text-muted);
 }
+/* Status rows and push-review notes are worth copying out (a refusal reason to
+   investigate): opt them out of the panel's inherited user-select:none. */
+.cfsync-status .cfsync-log,
+.cfsync-prow-note {
+    user-select: text;
+    cursor: text;
+}

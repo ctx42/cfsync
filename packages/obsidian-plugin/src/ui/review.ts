@@ -185,3 +185,21 @@ export function statusSections(
     ];
     return sections.filter((s) => s.lines.length > 0);
 }
+
+/**
+ * statusText renders the status sections as plain text for the clipboard, one
+ * `Title (n):` heading per section and one `  word  name  detail` line per row,
+ * sections separated by a blank line — the layout `cfsync status` prints.
+ */
+export function statusText(sections: StatusSection[]): string {
+    return sections
+        .map((s) => {
+            const rows = s.lines.map((l) =>
+                [`  ${l.word}`, l.name, l.detail]
+                    .filter((part) => part !== "")
+                    .join("  "),
+            );
+            return `${s.title} (${s.lines.length}):\n${rows.join("\n")}\n`;
+        })
+        .join("\n");
+}

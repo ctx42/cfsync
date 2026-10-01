@@ -8,6 +8,7 @@ import {
     reviewCommit,
     reviewModel,
     statusSections,
+    statusText,
 } from "../../src/ui/review.ts";
 
 const entry = (
@@ -97,6 +98,29 @@ describe("statusSections", () => {
         expect(have.map((s) => s.title)).toContain("Ignored");
         expect(have.find((s) => s.title === "Ignored")?.lines[0]?.name).toBe(
             "mine.md",
+        );
+    });
+});
+
+describe("statusText", () => {
+    it("renders sections as copyable plain text", () => {
+        const have = statusText([
+            {
+                title: "To push",
+                lines: [
+                    { name: "a.md", word: "modified", detail: "" },
+                    { name: "b.md", word: "refused", detail: "why" },
+                ],
+            },
+            {
+                title: "To pull",
+                lines: [{ name: "c.md", word: "remote", detail: "v1 → v2" }],
+            },
+        ]);
+
+        expect(have).toBe(
+            "To push (2):\n  modified  a.md\n  refused  b.md  why\n" +
+                "\nTo pull (1):\n  remote  c.md  v1 → v2\n",
         );
     });
 });
