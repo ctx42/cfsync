@@ -642,4 +642,46 @@ describe("pushPreflight resolves", () => {
         expect(have[0]?.cls).toBe("modified");
         expect(have[0]?.resolves).toEqual(['id:C1 "data type"']);
     });
+
+    it("does not refuse a comment whose anchor was never rendered", async () => {
+        const fs = new MemFS();
+        await pulled(fs, [C1]);
+        // As for a comment on an image: the pull drew the callout but no anchor.
+        for (const path of ["/vault/p.md", "/data/cache/p.v3.md"]) {
+            const md = await fs.readText(path);
+            await fs.write(path, dropAnchor("M1")(md));
+        }
+        await edit(fs, (md) => md.replace("keep", "kept"));
+        const stub = new StubHttpClient().on(
+            "GET",
+            `${v2}/pages?id=123&limit=250`,
+            {
+                body: JSON.stringify({
+                    results: [{ id: "123", version: { number: 3 } }],
+                    _links: {},
+                }),
+            },
+        );
+        const config = cfg();
+
+        const have = await pushPreflight(
+            {
+                client: new ConfluenceClient(stub, {
+                    host: config.host,
+                    account: config.account,
+                    token: config.token,
+                }),
+                fs,
+                yaml,
+                config,
+                cacheDir: "/data/cache",
+                flavor: obsidianFlavor,
+                links: null,
+            },
+            ["/vault/p.md"],
+        );
+
+        expect(have[0]?.cls).toBe("modified");
+        expect(have[0]?.resolves).toEqual([]);
+    });
 });

@@ -715,7 +715,12 @@ export class Pusher {
             dest,
         );
         const name = pageName(this.d.config.syncRoot, dest);
-        const resolutions = await this.planComments(meta.pageId, name, rawBody);
+        const resolutions = await this.planComments(
+            meta.pageId,
+            name,
+            meta.pageVersion,
+            rawBody,
+        );
         const resolving = new Set(resolutions.map((r) => r.thread.markerRef));
         const assets = metaAssets(meta);
         const links = linkMapper(
@@ -870,6 +875,7 @@ export class Pusher {
     private async planComments(
         pageId: string,
         name: string,
+        version: number,
         rawBody: string,
     ): Promise<Resolution[]> {
         if (!this.d.config.comments) {
@@ -878,6 +884,7 @@ export class Pusher {
         const threads = planResolves(
             await readRecord(this.d.fs, this.d.cacheDir, name),
             rawBody,
+            await readBaseBody(this.d.fs, this.d.cacheDir, name, version),
         );
         if (threads.length === 0) {
             return [];
@@ -1170,9 +1177,11 @@ async function localChange(
             dest,
         );
         const resolves = config.comments
-            ? planResolves(await readRecord(fs, cacheDir, name), rawBody).map(
-                  describe,
-              )
+            ? planResolves(
+                  await readRecord(fs, cacheDir, name),
+                  rawBody,
+                  await readBaseBody(fs, cacheDir, name, meta.pageVersion),
+              ).map(describe)
             : [];
         const assets = metaAssets(meta);
         const images = await newImageEdits(fs, body, assets, dest);
@@ -1346,6 +1355,27 @@ async function unchangedLocally(
         return note === cached;
     } catch {
         return false;
+    }
+}
+
+/**
+ * readBaseBody returns the body of the cached render of page `name` at
+ * `version` — the note as it was pulled — or null when that render is not
+ * cached or has no readable frontmatter.
+ */
+async function readBaseBody(
+    fs: FileSystem,
+    cacheDir: string,
+    name: string,
+    version: number,
+): Promise<string | null> {
+    try {
+        const text = await fs.readText(
+            posixJoin(cacheDir, mdCacheName(name, version)),
+        );
+        return splitFrontmatter(text).body;
+    } catch {
+        return null;
     }
 }
 

@@ -226,17 +226,28 @@ function noteMarks(body: string): {
  * both the callout and the anchor removed — which push resolves. It throws when
  * a thread lost only one of the two, naming each such comment, since that edit
  * is ambiguous: remove both to resolve, or neither to keep the comment.
+ *
+ * `baseBody` is the cached render the note was pulled as, when known. A thread
+ * whose anchor that render never drew — a comment on an image, or one pulled
+ * before such anchors were rendered — cannot have lost it, so the callout alone
+ * decides: kept while it is there, resolved once it is gone. Without `baseBody`
+ * every thread is expected to carry its anchor.
  */
 export function planResolves(
     threads: RecordedThread[],
     body: string,
+    baseBody: string | null = null,
 ): RecordedThread[] {
     const { callouts, anchors } = noteMarks(body);
+    const drawn = baseBody === null ? null : noteMarks(baseBody).anchors;
     const resolve: RecordedThread[] = [];
     const half: string[] = [];
     for (const t of threads) {
         const hasCallout = callouts.has(t.id);
-        const hasAnchor = anchors.has(t.markerRef);
+        const hasAnchor =
+            drawn === null || drawn.has(t.markerRef)
+                ? anchors.has(t.markerRef)
+                : hasCallout;
         if (!hasCallout && !hasAnchor) {
             resolve.push(t);
         } else if (hasCallout !== hasAnchor) {
