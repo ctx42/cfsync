@@ -653,3 +653,27 @@ export async function markIgnorePush(
         : `${head}${IGNORE_PUSH_LINE}\n`;
     await fs.write(dest, updated + tail);
 }
+
+/**
+ * clearIgnorePush removes the `cfsync-plugin: ignore-push` line from the
+ * frontmatter of the note at `dest`, so push and `status` consider it again —
+ * the "stop ignoring" answer. Every other byte of the note is kept; a note
+ * without the marker is left untouched.
+ */
+export async function clearIgnorePush(
+    fs: FileSystem,
+    dest: string,
+): Promise<void> {
+    const text = await fs.readText(dest);
+    const end = text.startsWith("---\n")
+        ? text.indexOf("\n---", "---".length)
+        : -1;
+    if (end < 0) {
+        return;
+    }
+    const head = text.slice(0, end + 1);
+    const updated = head.replace(/^cfsync-plugin: ignore-push\n/m, "");
+    if (updated !== head) {
+        await fs.write(dest, updated + text.slice(end + 1));
+    }
+}

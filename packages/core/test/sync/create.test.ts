@@ -10,6 +10,7 @@ import { parse as parseYaml } from "yaml";
 import type { Yaml } from "../../src/ports/yaml.ts";
 import {
     classifyCreates,
+    clearIgnorePush,
     deSlugTitle,
     markIgnorePush,
     rootOf,
@@ -262,6 +263,30 @@ describe("markIgnorePush", () => {
 
         await expect(markIgnorePush(fs, "/v/a.md")).rejects.toThrow(
             "no frontmatter",
+        );
+    });
+});
+
+describe("clearIgnorePush", () => {
+    it("removes the marker, keeping every other byte", async () => {
+        const fs = new MemFS();
+        const before = "---\ntitle: A\n---\n\nBody\n";
+        await fs.write("/v/a.md", before);
+        await markIgnorePush(fs, "/v/a.md");
+
+        await clearIgnorePush(fs, "/v/a.md");
+
+        expect(await fs.readText("/v/a.md")).toBe(before);
+    });
+
+    it("leaves a note without the marker untouched", async () => {
+        const fs = new MemFS();
+        await fs.write("/v/a.md", "---\ncfsync-plugin: pull\n---\nB\n");
+
+        await clearIgnorePush(fs, "/v/a.md");
+
+        expect(await fs.readText("/v/a.md")).toBe(
+            "---\ncfsync-plugin: pull\n---\nB\n",
         );
     });
 });

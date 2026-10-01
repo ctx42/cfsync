@@ -33,6 +33,7 @@ export * from "./confluence/sources.ts";
 export * from "./flavor/flavor.ts";
 export * from "./models/adf.ts";
 export * from "./ports/index.ts";
+export * from "./sync/actions.ts";
 export * from "./sync/assets.ts";
 export * from "./sync/clean.ts";
 export * from "./sync/create.ts";
