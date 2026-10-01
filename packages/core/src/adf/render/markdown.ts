@@ -421,7 +421,7 @@ export function annotationIdsOf(nod: Node): string[] {
  * With no comments in the context (the push/baseline path) it returns `""`, so
  * the render is byte-identical to a comment-free one.
  */
-function commentRefs(run: Node[], ctx: MdCtx): string {
+function commentRefs(run: Node[], ctx: MdCtx, anchored?: Set<string>): string {
     const byMarker = ctx.comments?.byMarker;
     if (byMarker === undefined || byMarker.size === 0) {
         return "";
@@ -432,8 +432,36 @@ function commentRefs(run: Node[], ctx: MdCtx): string {
         for (const id of annotationIdsOf(nod)) {
             if (byMarker.has(id) && !seen.has(id)) {
                 seen.add(id);
+                anchored?.add(id);
                 out += `[^${COMMENT_REF_PREFIX}${id}]`;
             }
+        }
+    }
+    return out;
+}
+
+/**
+ * inlineCommentRefs returns the `[^cf-<id>]` refs to append after one inline
+ * node rendered on its own — a linked text, a mention, an emoji — skipping any
+ * comment already anchored earlier in the same block (`anchored`), so a comment
+ * spanning several such nodes is anchored once. Without it a comment on link
+ * text drew its callout but no anchor, and the next push read the anchor as
+ * removed and refused the note.
+ */
+function inlineCommentRefs(
+    nod: Node,
+    ctx: MdCtx,
+    anchored: Set<string>,
+): string {
+    const byMarker = ctx.comments?.byMarker;
+    if (byMarker === undefined || byMarker.size === 0) {
+        return "";
+    }
+    let out = "";
+    for (const id of annotationIdsOf(nod)) {
+        if (byMarker.has(id) && !anchored.has(id)) {
+            anchored.add(id);
+            out += `[^${COMMENT_REF_PREFIX}${id}]`;
         }
     }
     return out;
@@ -823,11 +851,14 @@ export function inlineString(nod: Node, ctx: MdCtx): string {
  */
 export function inlineSegments(nod: Node, ctx: MdCtx): string[] {
     const segments: string[] = [];
+    // The comments anchored so far in this block, so a comment over several
+    // standalone inline nodes is anchored once (see inlineCommentRefs).
+    const anchored = new Set<string>();
     let b = "";
     let run: Node[] = [];
     const flush = (): void => {
         if (run.length > 0) {
-            b += renderTextRun(run) + commentRefs(run, ctx);
+            b += renderTextRun(run) + commentRefs(run, ctx, anchored);
             run = [];
         }
     };
@@ -843,7 +874,9 @@ export function inlineSegments(nod: Node, ctx: MdCtx): string[] {
             run.push(child);
         } else {
             flush();
-            b += renderInline(child, ctx);
+            b +=
+                renderInline(child, ctx) +
+                inlineCommentRefs(child, ctx, anchored);
         }
     }
     cut();

@@ -209,3 +209,50 @@ describe("comment decoration", () => {
         expect(out).not.toContain("dangling");
     });
 });
+
+describe("comment decoration on standalone inline nodes", () => {
+    const thread: CommentThread = {
+        id: "C1",
+        markerRef: "M1",
+        resolution: "open",
+        authorId: "jsmith",
+        createdAt: "2026-07-20T10:00:00Z",
+        body: para("Check the link."),
+        replies: [],
+    };
+    const comments: RenderComments = {
+        byMarker: new Map([["M1", thread]]),
+        trailing: [],
+    };
+    const annotation = `{ "type": "annotation",
+        "attrs": { "id": "M1", "annotationType": "inlineComment" } }`;
+    const link = (text: string): string => `{ "type": "text", "text": "${text}",
+        "marks": [ ${annotation}, { "type": "underline" },
+          { "type": "link", "attrs": { "href": "http://ex.com/" } } ] }`;
+
+    it("anchors a comment on link text", () => {
+        const doc = `{ "adf": { "type": "doc", "content": [
+           { "type": "paragraph", "content": [
+              { "type": "text", "text": "Visit " }, ${link("ex.com")} ] } ] } }`;
+
+        const have = body(doc, comments);
+
+        expect(have.split("\n")[0]).toBe(
+            "Visit [<u>ex.com</u>](http://ex.com/)[^cf-M1]",
+        );
+        // The anchor is decoration only: stripping it restores the plain render.
+        expect(stripCommentDecorations(have)).toBe(
+            body(doc, { byMarker: new Map(), trailing: [] }),
+        );
+    });
+
+    it("anchors a comment spanning two links once", () => {
+        const doc = `{ "adf": { "type": "doc", "content": [
+           { "type": "paragraph", "content": [
+              ${link("a")}, { "type": "text", "text": " " }, ${link("b")} ] } ] } }`;
+
+        const have = body(doc, comments);
+
+        expect(have.match(/\[\^cf-M1\]/g)).toHaveLength(1);
+    });
+});
