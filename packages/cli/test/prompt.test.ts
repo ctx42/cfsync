@@ -5,6 +5,7 @@ import type { CreateInput, StaleItem } from "@cfsync/core";
 import { describe, expect, it } from "vitest";
 import {
     confirmCreates,
+    confirmOverwrite,
     confirmStale,
     type PromptOptions,
 } from "../src/prompt.ts";
@@ -87,7 +88,16 @@ describe("confirmCreates", () => {
 
     it("creates ticked pages, marks never ones, and skips the rest", async () => {
         const marked: string[] = [];
-        const keys = scripted(["c", "\x1b[B", "n", "\x1b[B", "\r"]);
+        const keys = scripted([
+            "c",
+            "\x1b[B",
+            "n",
+            "\x1b[B",
+            " ",
+            " ",
+            " ",
+            "\r",
+        ]);
         const decided = await confirmCreates(
             [cand("/v/a.md"), cand("/v/b.md"), cand("/v/c.md")],
             opts({
@@ -147,6 +157,26 @@ describe("confirmStale", () => {
     it("refuses to prompt without a terminal", async () => {
         await expect(
             confirmStale(items, opts({ isTTY: false })),
+        ).rejects.toThrow("re-run with --yes");
+    });
+});
+
+describe("confirmOverwrite", () => {
+    it("lists the notes and goes on only on yes", async () => {
+        let shown = "";
+        const o = opts({ err: (t) => (shown += t) }, ["y"]);
+
+        expect(await confirmOverwrite(["a.md", "b.md"], o)).toBe(true);
+        expect(shown).toContain("  a.md\n  b.md\n");
+        expect(await confirmOverwrite(["a.md"], opts({}, [""]))).toBe(false);
+    });
+
+    it("accepts with --yes and refuses without a terminal", async () => {
+        expect(await confirmOverwrite(["a.md"], opts({ yes: true }))).toBe(
+            true,
+        );
+        await expect(
+            confirmOverwrite(["a.md"], opts({ isTTY: false })),
         ).rejects.toThrow("re-run with --yes");
     });
 });

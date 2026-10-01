@@ -31,6 +31,9 @@ export interface PromptOptions {
     markNever: (dest: string) => Promise<void>;
 }
 
+/** CREATE_OPTIONS are a new page's selector options, the default first. */
+const CREATE_OPTIONS = ["ask later", "create", "never push"];
+
 /**
  * confirmCreates decides which create candidates to make, the callback push's
  * `planCreates` expects. It prints the summary, then accepts all with `--yes`,
@@ -61,13 +64,21 @@ export async function confirmCreates(
         );
     }
 
-    const labels = cands.map(
-        (c) => `${pageName(opts.syncRoot, c.dest)} — "${c.title}"`,
-    );
-    const choices = await runSelect(labels, opts.keys(), opts.err);
+    const rows = cands.map((c) => ({
+        label: `${pageName(opts.syncRoot, c.dest)} — "${c.title}"`,
+        options: CREATE_OPTIONS,
+    }));
+    let choices: number[];
+    try {
+        choices = await runSelect(rows, opts.keys(), opts.err);
+    } catch (err) {
+        throw err instanceof Error && err.message === "cancelled"
+            ? new Error("push cancelled")
+            : err;
+    }
     for (const [i, c] of cands.entries()) {
-        const choice = choices[i] ?? "later";
-        if (choice === "never") {
+        const choice = CREATE_OPTIONS[choices[i] ?? 0];
+        if (choice === "never push") {
             await opts.markNever(c.dest);
         }
         decided.set(c.dest, choice === "create");
@@ -97,6 +108,34 @@ export async function confirmStale(
         .trim()
         .toLowerCase();
     return line === "y" || line === "yes" ? items : [];
+}
+
+/**
+ * confirmOverwrite asks once before notes are replaced with their Confluence
+ * version, listing every note whose local edits would be lost. `--yes` accepts
+ * without asking; without a terminal it refuses. It returns whether to go on.
+ */
+export async function confirmOverwrite(
+    names: string[],
+    opts: PromptOptions,
+): Promise<boolean> {
+    if (names.length === 0 || opts.yes) {
+        return true;
+    }
+    if (!opts.isTTY) {
+        throw new Error(
+            "refusing to prompt without a terminal; re-run with --yes",
+        );
+    }
+    let out = `cfsync: overwriting discards the local edits in ${names.length} note(s):\n`;
+    for (const n of names) {
+        out += `  ${n}\n`;
+    }
+    opts.err(out);
+    const line = (await opts.ask("Overwrite them with Confluence? [y/N]: "))
+        .trim()
+        .toLowerCase();
+    return line === "y" || line === "yes";
 }
 
 /** createSummary lists the new pages a push would create, one per line. */

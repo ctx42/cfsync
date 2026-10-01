@@ -11,6 +11,9 @@
 // since it belongs to the terminal, not the sync.
 
 import {
+    ACTION_LABELS,
+    applyActions,
+    type Choice,
     type Config,
     type ConfluenceClient,
     type CreateInput,
@@ -22,6 +25,7 @@ import {
     loadLinkIndex,
     MetaCache,
     managedPushDests,
+    overwrites,
     type PageAction,
     type PreflightEntry,
     Puller,
@@ -37,9 +41,11 @@ import {
     resolveFlavor,
     resolvePagePath,
     resolvePageSource,
+    rowActions,
     type StaleItem,
     type StatusOptions,
     type StatusReport,
+    statusRows,
     type Yaml,
 } from "@cfsync/core";
 import type { RuntimeDirs } from "./config-load.ts";
@@ -61,6 +67,9 @@ export interface CliDeps {
     /** Mints a fresh media-node localId for an uploaded image. */
     mintLocalId: () => string;
 }
+
+/** ConfirmOverwrite asks whether to discard the local edits of the named notes. */
+export type ConfirmOverwrite = (names: string[]) => Promise<boolean>;
 
 /** ConfirmCreates decides which create candidates to make (dest → create). */
 export type ConfirmCreates = (
@@ -89,7 +98,24 @@ export async function runTest(d: CliDeps): Promise<CommandResult> {
 export async function runPull(
     d: CliDeps,
     selected: string,
+    overwrite: ConfirmOverwrite | null = null,
 ): Promise<CommandResult> {
+    if (overwrite !== null) {
+        if (selected === "") {
+            return {
+                out: "",
+                error: new Error("--overwrite needs the path of one note"),
+            };
+        }
+        const name = pageName(
+            d.config.syncRoot,
+            resolvePagePath(d.config.syncRoot, selected),
+        );
+        if (!(await overwrite([name]))) {
+            return { out: "cfsync: nothing overwritten\n", error: null };
+        }
+        return pullSelected(d, selected, true);
+    }
     if (selected !== "") {
         return pullSelected(d, selected);
     }
@@ -124,6 +150,7 @@ export async function runPull(
 async function pullSelected(
     d: CliDeps,
     selected: string,
+    overwrite = false,
 ): Promise<CommandResult> {
     const dest = resolvePagePath(d.config.syncRoot, selected);
     const name = pageName(d.config.syncRoot, dest);
@@ -152,6 +179,7 @@ async function pullSelected(
         assetsDir: d.dirs.assetsDir,
         links,
         flavor: resolveFlavor(d.config.flavor),
+        overwrite,
     });
     const { state, action, version } = await puller.pullOne(
         dest,
@@ -240,6 +268,7 @@ export async function runStatus(
     d: CliDeps,
     selected: string,
     ignored: boolean,
+    interactive: StatusInteractive | null = null,
 ): Promise<CommandResult> {
     const opts: StatusOptions = { ignored };
     if (selected !== "") {
@@ -271,7 +300,81 @@ export async function runStatus(
             ),
         };
     }
-    return { out: statusReport(report, d.config.syncRoot), error: null };
+    if (interactive === null) {
+        return { out: statusReport(report, d.config.syncRoot), error: null };
+    }
+    return actOnStatus(d, report, interactive);
+}
+
+/**
+ * StatusInteractive drives `status -i`: `select` shows the rows, each cycling
+ * through its action labels, and returns each row's chosen index; `confirm`
+ * asks before notes lose their local edits to an overwrite.
+ */
+export interface StatusInteractive {
+    select: (rows: { label: string; options: string[] }[]) => Promise<number[]>;
+    confirm: ConfirmOverwrite;
+}
+
+/**
+ * actOnStatus lets the user pick an action per status row, confirms any
+ * overwrite once, then applies the choices (see {@link applyActions}) and
+ * reports one line per applied action. Nothing chosen applies nothing; a
+ * declined overwrite confirmation applies nothing either. A failed action is
+ * reported and fails the command, after the others have run.
+ */
+async function actOnStatus(
+    d: CliDeps,
+    report: StatusReport,
+    ui: StatusInteractive,
+): Promise<CommandResult> {
+    const rows = statusRows(report, d.config.syncRoot);
+    if (rows.length === 0) {
+        return { out: statusReport(report, d.config.syncRoot), error: null };
+    }
+    const width = Math.max(...rows.map((r) => r.kind.length));
+    const picked = await ui.select(
+        rows.map((r) => ({
+            label: `${r.kind.padEnd(width)}  ${r.name}`,
+            options: rowActions(r.kind).map((a) => ACTION_LABELS[a]),
+        })),
+    );
+    const choices: Choice[] = rows.map((row, i) => ({
+        row,
+        action: rowActions(row.kind)[picked[i] ?? 0] ?? "skip",
+    }));
+    if (choices.every((c) => c.action === "skip")) {
+        return { out: "cfsync: nothing to apply\n", error: null };
+    }
+    const lose = overwrites(choices).map((r) => r.name);
+    if (!(await ui.confirm(lose))) {
+        return { out: "cfsync: nothing applied\n", error: null };
+    }
+    const results = await applyActions(
+        {
+            client: d.client,
+            fs: d.fs,
+            yaml: d.yaml,
+            config: d.config,
+            reporter: d.reporter,
+            cacheDir: d.dirs.cacheDir,
+            assetsDir: d.dirs.assetsDir,
+            linksPath: d.dirs.linksPath,
+            mintLocalId: d.mintLocalId,
+            flavor: resolveFlavor(d.config.flavor),
+        },
+        choices,
+    );
+    let out = "";
+    for (const r of results) {
+        out += `  ${r.ok ? "ok    " : "failed"}  ${ACTION_LABELS[r.action]}  ${r.name}  (${r.detail})\n`;
+    }
+    const failed = results.filter((r) => !r.ok).length;
+    out += `cfsync: ${results.length - failed} of ${results.length} actions applied\n`;
+    return {
+        out,
+        error: failed > 0 ? new Error(`${failed} action(s) failed`) : null,
+    };
 }
 
 /** StatusRow is one rendered `status` line: its status word, page, and detail. */

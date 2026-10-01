@@ -421,6 +421,108 @@ describe("status command", () => {
         );
     });
 
+    describe("with -i", () => {
+        const pageEntry = "pages:\n  wiki/A.md: /wiki/spaces/T/pages/1/A\n";
+        const live = (): StubHttpClient =>
+            new StubHttpClient()
+                .on("GET", bulkURL("1"), { body: bulk(["1", 5]) })
+                .on(
+                    "GET",
+                    `${HOST}/wiki/api/v2/pages/1?body-format=atlas_doc_format`,
+                    {
+                        body: JSON.stringify({
+                            id: "1",
+                            title: "P",
+                            spaceId: "9",
+                            parentId: "",
+                            version: { number: 5 },
+                            body: {
+                                atlas_doc_format: {
+                                    value: JSON.stringify(adfDoc),
+                                },
+                            },
+                        }),
+                    },
+                );
+
+        /** interactive runs `status -i` with scripted keys and answers. */
+        async function interactive(
+            fs: MemFS,
+            http: StubHttpClient,
+            keys: string[],
+            answers: string[] = [],
+        ) {
+            const { ctx, streams } = ctxFor(
+                ["status", "-i", ...CONFIG_ARG],
+                fs,
+                secretsEnv("/w"),
+                http,
+            );
+            let k = 0;
+            let a = 0;
+            ctx.stdinIsTTY = true;
+            ctx.keys = () => ({
+                next: () => Promise.resolve(keys[k++] ?? "\r"),
+                close: () => {},
+            });
+            ctx.ask = () => Promise.resolve(answers[a++] ?? "");
+            return { code: await main(ctx), streams };
+        }
+
+        it("applies nothing when enter is pressed straight away", async () => {
+            const fs = await withConfig(pageEntry);
+            await pulled(fs, "wiki/A.md", "1", 5, true);
+            const edited = await fs.readText("/w/wiki/A.md");
+
+            const have = await interactive(fs, live(), ["\r"]);
+
+            expect(have.code).toBe(EXIT_OK);
+            expect(have.streams.outText()).toBe("cfsync: nothing to apply\n");
+            expect(await fs.readText("/w/wiki/A.md")).toBe(edited);
+        });
+
+        it("overwrites a modified note after the confirmation", async () => {
+            const fs = await withConfig(pageEntry);
+            await pulled(fs, "wiki/A.md", "1", 5, true);
+
+            const have = await interactive(fs, live(), ["o", "\r"], ["y"]);
+
+            expect(have.code).toBe(EXIT_OK);
+            expect(have.streams.errText()).toContain("  wiki/A.md\n");
+            expect(have.streams.outText()).toContain(
+                "ok      overwrite from Confluence  wiki/A.md",
+            );
+            expect(await fs.readText("/w/wiki/A.md")).toContain("Body text.");
+        });
+
+        it("applies nothing when the overwrite is declined", async () => {
+            const fs = await withConfig(pageEntry);
+            await pulled(fs, "wiki/A.md", "1", 5, true);
+            const edited = await fs.readText("/w/wiki/A.md");
+
+            const have = await interactive(fs, live(), ["o", "\r"], ["n"]);
+
+            expect(have.streams.outText()).toBe("cfsync: nothing applied\n");
+            expect(await fs.readText("/w/wiki/A.md")).toBe(edited);
+        });
+
+        it("refuses without a terminal", async () => {
+            const fs = await withConfig(pageEntry);
+            await pulled(fs, "wiki/A.md", "1", 5, true);
+            const { ctx, streams } = ctxFor(
+                ["status", "-i", ...CONFIG_ARG],
+                fs,
+                secretsEnv("/w"),
+                live(),
+            );
+
+            expect(await main(ctx)).toBe(EXIT_ERR);
+            expect(streams.errText()).toContain(
+                "needs an interactive terminal",
+            );
+        });
+    });
+
     it("fails without a report when Confluence cannot be reached", async () => {
         const fs = await vault();
         await pulled(fs, "wiki/A.md", "1", 5, true);

@@ -1,34 +1,31 @@
 // SPDX-FileCopyrightText: (c) 2026 Rafal Zajac
 // SPDX-License-Identifier: MIT
 
-// The interactive checkbox list push shows for new pages: one row per new note,
-// each cycling through "ask again next time", "create", and "never" (mark it
-// ignore-push). Every row starts undecided, so pressing enter straight away
-// creates nothing. The state machine ({@link stepSelect}) and the rendering
-// ({@link renderSelect}) are pure; the keys come from an injected
-// {@link KeySource}, so the whole selector is tested without a terminal, and
-// `nodeKeys` wires the real one over a raw-mode stdin.
+// The CLI's interactive row selector: one row per item, each cycling through its
+// own options and starting at the first, so pressing enter straight away keeps
+// every row at its default. Push uses it for new pages (ask later / create /
+// never push) and `status -i` for each status row's actions. The state machine
+// ({@link stepSelect}) and the rendering ({@link renderSelect}) are pure; the
+// keys come from an injected {@link KeySource}, so the whole selector is tested
+// without a terminal, and `nodeKeys` wires the real one over a raw-mode stdin.
 
-/** Choice is one new note's decision: skip it this time, create it, or never ask again. */
-export type Choice = "later" | "create" | "never";
+/** SelectRow is one selector row: its label and the options it cycles through. */
+export interface SelectRow {
+    label: string;
+    /** The row's options, the first being the default. */
+    options: string[];
+}
 
-/** SelectState is the selector's cursor row and every row's current choice. */
+/** SelectState is the selector's cursor row and each row's chosen option index. */
 export interface SelectState {
     cursor: number;
-    choices: Choice[];
+    choices: number[];
 }
 
 /** Key is a decoded keypress the selector reacts to. */
 export type Key =
-    | "up"
-    | "down"
-    | "cycle"
-    | "create"
-    | "never"
-    | "later"
-    | "enter"
-    | "cancel"
-    | "other";
+    | { kind: "up" | "down" | "next" | "prev" | "enter" | "cancel" | "other" }
+    | { kind: "letter"; letter: string };
 
 /** KeySource yields raw keypress data, one key per {@link KeySource.next} call. */
 export interface KeySource {
@@ -38,68 +35,66 @@ export interface KeySource {
     close(): void;
 }
 
-/** CYCLE is the order space steps a row through. */
-const CYCLE: Choice[] = ["later", "create", "never"];
-
 /** decodeKey maps raw keypress data onto a {@link Key}. */
 export function decodeKey(data: string): Key {
     switch (data) {
         case "\x1b[A":
-        case "k":
-            return "up";
+            return { kind: "up" };
         case "\x1b[B":
-        case "j":
-            return "down";
+            return { kind: "down" };
         case " ":
-            return "cycle";
-        case "c":
-        case "y":
-            return "create";
-        case "n":
-            return "never";
-        case "l":
-        case "u":
-            return "later";
+        case "\x1b[C":
+            return { kind: "next" };
+        case "\x1b[D":
+            return { kind: "prev" };
         case "\r":
         case "\n":
-            return "enter";
+            return { kind: "enter" };
         case "\x03":
         case "\x1b":
         case "q":
-            return "cancel";
-        default:
-            return "other";
+            return { kind: "cancel" };
     }
+    return /^[a-z]$/.test(data)
+        ? { kind: "letter", letter: data }
+        : { kind: "other" };
 }
 
 /**
- * stepSelect applies `key` to `state`, returning the next state, `"done"` on
- * enter, or `"cancel"` on ctrl-c / escape / q. The cursor stops at both ends.
+ * stepSelect applies `key` to `state` over `rows`, returning the next state,
+ * `"done"` on enter, or `"cancel"` on ctrl-c / escape / q. The cursor stops at
+ * both ends; next and prev cycle the cursor row's options; a letter picks the
+ * row's first option starting with it.
  */
 export function stepSelect(
+    rows: SelectRow[],
     state: SelectState,
     key: Key,
 ): SelectState | "done" | "cancel" {
-    const last = state.choices.length - 1;
-    const set = (c: Choice): SelectState => ({
+    const n = rows[state.cursor]?.options.length ?? 1;
+    const now = state.choices[state.cursor] ?? 0;
+    const set = (choice: number): SelectState => ({
         cursor: state.cursor,
-        choices: state.choices.map((v, i) => (i === state.cursor ? c : v)),
+        choices: state.choices.map((v, i) => (i === state.cursor ? choice : v)),
     });
-    switch (key) {
+    switch (key.kind) {
         case "up":
             return { ...state, cursor: Math.max(0, state.cursor - 1) };
         case "down":
-            return { ...state, cursor: Math.min(last, state.cursor + 1) };
-        case "cycle": {
-            const now = state.choices[state.cursor] ?? "later";
-            return set(
-                CYCLE[(CYCLE.indexOf(now) + 1) % CYCLE.length] ?? "later",
+            return {
+                ...state,
+                cursor: Math.min(rows.length - 1, state.cursor + 1),
+            };
+        case "next":
+            return set((now + 1) % n);
+        case "prev":
+            return set((now + n - 1) % n);
+        case "letter": {
+            const at = (rows[state.cursor]?.options ?? []).findIndex((o) =>
+                o.startsWith(key.letter),
             );
+            return at < 0 ? state : set(at);
         }
-        case "create":
-        case "never":
-        case "later":
-            return set(key);
         case "enter":
             return "done";
         case "cancel":
@@ -111,61 +106,52 @@ export function stepSelect(
 
 /** HELP is the selector's key legend. */
 const HELP =
-    "  ↑/↓ move · space cycle · c create · n never · l later · enter apply · q cancel";
+    "  ↑/↓ move · space/→ next · ← previous · first letter picks · " +
+    "enter apply · q cancel";
 
-/** BOX is each choice's checkbox. */
-const BOX: Record<Choice, string> = {
-    later: "[ ]",
-    create: "[x]",
-    never: "[-]",
-};
-
-/** NOTE is each choice's trailing note. */
-const NOTE: Record<Choice, string> = {
-    later: "",
-    create: "  create",
-    never: "  never (mark ignore-push)",
-};
-
-/** renderSelect returns the selector's lines: the legend, then one row per label. */
-export function renderSelect(labels: string[], state: SelectState): string[] {
-    const rows = labels.map((label, i) => {
-        const choice = state.choices[i] ?? "later";
+/**
+ * renderSelect returns the selector's lines: the legend, then one row per item
+ * with its label padded to a common width and its chosen option in brackets.
+ * A row away from its default is marked with `*`.
+ */
+export function renderSelect(rows: SelectRow[], state: SelectState): string[] {
+    const width = Math.max(0, ...rows.map((r) => r.label.length));
+    const lines = rows.map((r, i) => {
+        const choice = state.choices[i] ?? 0;
         const pointer = i === state.cursor ? ">" : " ";
-        return `${pointer} ${BOX[choice]} ${label}${NOTE[choice]}`;
+        const mark = choice === 0 ? " " : "*";
+        const option = r.options[choice] ?? "";
+        return `${pointer}${mark} ${r.label.padEnd(width)}  [${option}]`;
     });
-    return [HELP, ...rows];
+    return [HELP, ...lines];
 }
 
 /**
- * runSelect shows the selector for `labels` on `write` (stderr) and returns
- * every row's final choice once enter is pressed. It redraws in place after each
- * key. It throws when the user cancels, so the caller aborts rather than
+ * runSelect shows the selector for `rows` on `write` (stderr) and returns each
+ * row's chosen option index once enter is pressed. It redraws in place after
+ * each key. It throws when the user cancels, so the caller aborts rather than
  * guessing, and always closes `keys`.
  */
 export async function runSelect(
-    labels: string[],
+    rows: SelectRow[],
     keys: KeySource,
     write: (text: string) => void,
-): Promise<Choice[]> {
-    let state: SelectState = {
-        cursor: 0,
-        choices: labels.map((): Choice => "later"),
-    };
-    let lines = renderSelect(labels, state);
+): Promise<number[]> {
+    let state: SelectState = { cursor: 0, choices: rows.map(() => 0) };
+    let lines = renderSelect(rows, state);
     write(`${lines.join("\n")}\n`);
     try {
         for (;;) {
-            const next = stepSelect(state, decodeKey(await keys.next()));
+            const next = stepSelect(rows, state, decodeKey(await keys.next()));
             if (next === "done") {
                 return state.choices;
             }
             if (next === "cancel") {
-                throw new Error("push cancelled");
+                throw new Error("cancelled");
             }
             state = next;
             // Move up over the previous drawing and rewrite every line.
-            lines = renderSelect(labels, state);
+            lines = renderSelect(rows, state);
             write(
                 `\x1b[${lines.length}A` +
                     lines.map((l) => `\x1b[2K${l}\n`).join(""),

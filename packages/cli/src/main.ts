@@ -43,9 +43,9 @@ import {
     loadEnvFile,
     runtimeDirs,
 } from "./config-load.ts";
-import { confirmCreates, confirmStale } from "./prompt.ts";
+import { confirmCreates, confirmOverwrite, confirmStale } from "./prompt.ts";
 import { newReporter } from "./reporter.ts";
-import type { KeySource } from "./select.ts";
+import { type KeySource, runSelect } from "./select.ts";
 import { VERSION } from "./version.ts";
 
 /** Process exit codes. */
@@ -131,6 +131,8 @@ interface ConfigFlags {
     force: boolean;
     dropComments: boolean;
     ignored: boolean;
+    overwrite: boolean;
+    interactive: boolean;
     page: string;
 }
 
@@ -227,7 +229,13 @@ function runCommand(
         case "test":
             return runTest(deps);
         case "pull":
-            return runPull(deps, flags.page);
+            return runPull(
+                deps,
+                flags.page,
+                flags.overwrite
+                    ? (names) => confirmOverwrite(names, promptOpts)
+                    : null,
+            );
         case "push":
             return runPush(
                 deps,
@@ -237,7 +245,29 @@ function runCommand(
                 flags.dropComments,
             );
         case "status":
-            return runStatus(deps, flags.page, flags.ignored);
+            return runStatus(
+                deps,
+                flags.page,
+                flags.ignored,
+                flags.interactive
+                    ? {
+                          select: (rows) => {
+                              if (!promptOpts.isTTY) {
+                                  throw new Error(
+                                      "status -i needs an interactive terminal",
+                                  );
+                              }
+                              return runSelect(
+                                  rows,
+                                  promptOpts.keys(),
+                                  promptOpts.err,
+                              );
+                          },
+                          confirm: (names) =>
+                              confirmOverwrite(names, promptOpts),
+                      }
+                    : null,
+            );
         case "gc":
             return runGc(deps, flags.prune);
         case "clean":
@@ -267,8 +297,11 @@ function parseFlags(
     if (withSyncRoot) {
         options["sync-root"] = { type: "string" };
     }
-    if (cmd === "push" || cmd === "clean") {
+    if (cmd === "push" || cmd === "clean" || cmd === "pull") {
         options["yes"] = { type: "boolean" };
+    }
+    if (cmd === "pull") {
+        options["overwrite"] = { type: "boolean" };
     }
     if (cmd === "push") {
         options["force"] = { type: "boolean" };
@@ -279,6 +312,8 @@ function parseFlags(
     }
     if (cmd === "status") {
         options["ignored"] = { type: "boolean" };
+        options["interactive"] = { type: "boolean", short: "i" };
+        options["yes"] = { type: "boolean" };
     }
     try {
         const { values, positionals } = parseArgs({
@@ -297,6 +332,8 @@ function parseFlags(
             force?: boolean;
             "drop-comments"?: boolean;
             ignored?: boolean;
+            overwrite?: boolean;
+            interactive?: boolean;
             help?: boolean;
         };
         if (v.help === true) {
@@ -317,6 +354,8 @@ function parseFlags(
             force: cmd === "push" ? v.force === true : false,
             dropComments: cmd === "push" ? v["drop-comments"] === true : false,
             ignored: v.ignored === true,
+            overwrite: v.overwrite === true,
+            interactive: v.interactive === true,
             page: withPage ? (positionals[0] ?? "") : "",
         };
     } catch (err) {
@@ -403,8 +442,15 @@ const COMMAND_USAGE: Record<ConfigCommand, string> = {
         "Pull configured pages, and the pages of configured folders and spaces,\n" +
         "into the ADF cache. With a [page] argument — a sync-root-relative or\n" +
         "absolute path to one managed .md file — pull only that page.\n" +
+        "\n" +
+        "Pull never loses a local edit: it three-way merges it with the\n" +
+        "Confluence version. With --overwrite and a [page], the note is instead\n" +
+        "replaced with its Confluence version, discarding its local edits, after\n" +
+        "a confirmation (add --yes to skip it).\n" +
         "\nFlags:\n" +
-        FLAGS_COMMON,
+        FLAGS_COMMON +
+        "  --overwrite         Replace [page] with its Confluence version.\n" +
+        "  --yes               Overwrite without asking.\n",
     push:
         "cfsync push — push edited Markdown back to Confluence.\n" +
         "\nUsage:\n  cfsync push [flags] [page]\n" +
@@ -435,7 +481,11 @@ const COMMAND_USAGE: Record<ConfigCommand, string> = {
         "Confluence cannot be reached; exits 0 otherwise, changes pending or not.\n" +
         "\nFlags:\n" +
         FLAGS_COMMON +
-        "  --ignored           Also list notes push never touches (ignore-push).\n",
+        "  --ignored           Also list notes push never touches (ignore-push).\n" +
+        "  -i, --interactive   Pick an action per row, then apply them: push,\n" +
+        "                      pull, create, never push, stop ignoring, or\n" +
+        "                      overwrite from Confluence (asks first).\n" +
+        "  --yes               With -i, overwrite without asking.\n",
     gc:
         "cfsync gc — list orphaned files in the shared _cfsync-media directory.\n" +
         "\nUsage:\n  cfsync gc [flags]\n" +

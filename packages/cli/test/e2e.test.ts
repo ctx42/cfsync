@@ -200,6 +200,75 @@ describe("pull → edit → push round-trip over the real adapter", () => {
     });
 });
 
+describe("pull --overwrite over the real adapter", () => {
+    const pageEntry = "pages:\n  notes/p.md: /wiki/spaces/T/pages/100/Hello\n";
+    const site = () =>
+        started(
+            newState(HOST, "acc-9", [
+                {
+                    id: "100",
+                    title: "Hello",
+                    version: 1,
+                    spaceId: "9",
+                    parentId: "",
+                    adf: paragraphDoc("Hello world"),
+                },
+            ]),
+        );
+
+    it("replaces a locally edited note with --yes", async () => {
+        site();
+        const cfg = await writeConfig(pageEntry);
+        const note = join(dir, "notes/p.md");
+        await run(["pull", ...cfg]);
+        const fresh = await readFile(note, "utf8");
+        await writeFile(note, fresh.replace("Hello world", "Hello EDITED"));
+
+        // A plain pull keeps the edit.
+        await run(["pull", "notes/p.md", ...cfg]);
+        expect(await readFile(note, "utf8")).toContain("Hello EDITED");
+
+        const have = await run([
+            "pull",
+            "--overwrite",
+            "--yes",
+            "notes/p.md",
+            ...cfg,
+        ]);
+
+        expect(have.code).toBe(EXIT_OK);
+        expect(await readFile(note, "utf8")).toBe(fresh);
+    });
+
+    it("refuses to overwrite without a terminal or --yes", async () => {
+        site();
+        const cfg = await writeConfig(pageEntry);
+        const note = join(dir, "notes/p.md");
+        await run(["pull", ...cfg]);
+        const edited = (await readFile(note, "utf8")).replace(
+            "Hello world",
+            "Hello EDITED",
+        );
+        await writeFile(note, edited);
+
+        const have = await run(["pull", "--overwrite", "notes/p.md", ...cfg]);
+
+        expect(have.code).not.toBe(EXIT_OK);
+        expect(have.err).toContain("re-run with --yes");
+        expect(await readFile(note, "utf8")).toBe(edited);
+    });
+
+    it("rejects --overwrite without a note path", async () => {
+        site();
+        const cfg = await writeConfig(pageEntry);
+
+        const have = await run(["pull", "--overwrite", "--yes", ...cfg]);
+
+        expect(have.code).not.toBe(EXIT_OK);
+        expect(have.err).toContain("--overwrite needs the path of one note");
+    });
+});
+
 describe("create a new note under a root over the real adapter", () => {
     it("discovers a fresh note, creates the page, and stamps its id", async () => {
         const state = started(newState(HOST, "acc-9"));
