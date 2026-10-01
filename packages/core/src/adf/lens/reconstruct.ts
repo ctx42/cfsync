@@ -133,7 +133,7 @@ export function putLinks(
     const pc: ParseCtx = { mentions: mentions ?? {}, links };
     const base = assets ?? {};
     const [baseBlocks, origins] = baselineBlocks(adf, base, links);
-    const userBlocks = segmentBody(body);
+    const userBlocks = segmentBody(normalizeLegacyRules(body));
     const edits = diffBlocks(baseBlocks, userBlocks);
 
     const out = clone(adf);
@@ -175,6 +175,29 @@ export function putLinks(
 
     validatePut(out, baseBlocks, userBlocks, edits, full, links);
     return out;
+}
+
+/**
+ * LEGACY_RULE matches a top-level frozen adf block holding a horizontal rule —
+ * `type: rule` and at most its `localId` — as older renders wrote it.
+ */
+const LEGACY_RULE = /^```adf\ntype: rule\n(?:localId: [^\n]*\n)?```$/gm;
+
+/**
+ * normalizeLegacyRules rewrites each legacy frozen rule block in an edited body
+ * to the `---` thematic break the renderer emits today. Older renders froze a
+ * rule as an adf block; the baseline now re-renders it as `---`, so without this
+ * the diff would read the fence as a new block and push it as a literal code
+ * block in place of the rule. Normalized, the block pairs with the baseline rule
+ * as a keep and the cached node (with its localId) is copied untouched. The
+ * removed fence lines become blank lines, which separate blocks without forming
+ * one, so the body keeps its line count and refusals still name the file line.
+ */
+function normalizeLegacyRules(body: string): string {
+    return body.replace(
+        LEGACY_RULE,
+        (fence) => `---${"\n".repeat(fence.split("\n").length - 1)}`,
+    );
 }
 
 /**

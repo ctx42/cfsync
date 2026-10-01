@@ -332,6 +332,79 @@ describe("put modify", () => {
         expect(attrStr(ext?.attrs, "localId")).toBe("c1e7a4d9b206");
     });
 
+    it("keeps a rule an older render froze as an adf block", () => {
+        const base = newADF(`{ "adf": { "type": "doc", "content": [
+           { "type": "paragraph", "attrs": { "localId": "p" },
+             "content": [ { "type": "text", "text": "intro" } ] },
+           { "type": "rule", "attrs": { "localId": "r1" } },
+           { "type": "paragraph", "attrs": { "localId": "q" },
+             "content": [ { "type": "text", "text": "outro" } ] } ] } }`);
+        // The legacy note spells the rule as a frozen block, not `---`.
+        const legacy = renderBody(base).replace(
+            "---",
+            "```adf\ntype: rule\nlocalId: r1\n```",
+        );
+        expect(legacy).toContain("type: rule");
+
+        const have = put(base, legacy, null, null, null);
+
+        expect(json(have)).toBe(json(base));
+    });
+
+    it("keeps a legacy frozen rule across a neighbor edit", () => {
+        const base = newADF(`{ "adf": { "type": "doc", "content": [
+           { "type": "paragraph", "attrs": { "localId": "p" },
+             "content": [ { "type": "text", "text": "intro" } ] },
+           { "type": "rule", "attrs": { "localId": "r1" } } ] } }`);
+        const legacy = renderBody(base)
+            .replace("---", "```adf\ntype: rule\nlocalId: r1\n```")
+            .replace("intro", "rewritten intro");
+
+        const have = put(base, legacy, null, null, null);
+
+        expect(have.doc.content?.[0]?.content?.[0]?.text).toBe(
+            "rewritten intro",
+        );
+        expect(have.doc.content?.[1]).toEqual({
+            type: "rule",
+            attrs: { localId: "r1" },
+        });
+    });
+
+    it("restores a rule a pre-fix push froze as a code block", () => {
+        // A pre-fix push wrote the legacy rule fence to the Site as a code
+        // block; its render is that same fence, which now pushes as a rule.
+        const base = newADF(`{ "adf": { "type": "doc", "content": [
+           { "type": "codeBlock", "attrs": { "language": "adf" },
+             "content": [ { "type": "text",
+               "text": "type: rule\\nlocalId: r1" } ] },
+           { "type": "paragraph", "attrs": { "localId": "p" },
+             "content": [ { "type": "text", "text": "intro" } ] } ] } }`);
+        const body = renderBody(base).replace("intro", "rewritten intro");
+
+        const have = put(base, body, null, null, null);
+
+        expect(have.doc.content?.[0]?.type).toBe("rule");
+        expect(have.doc.content?.[1]?.content?.[0]?.text).toBe(
+            "rewritten intro",
+        );
+    });
+
+    it("names the right file line after a normalized legacy rule", () => {
+        const base = newADF(`{ "adf": { "type": "doc", "content": [
+           { "type": "rule", "attrs": { "localId": "r1" } },
+           { "type": "paragraph", "attrs": { "localId": "p" },
+             "content": [ { "type": "text", "text": "a" } ] } ] } }`);
+        const legacy = renderBody(base).replace(
+            "---",
+            "```adf\ntype: rule\nlocalId: r1\n```",
+        );
+        // Lines 1-4 the fence, 6 the paragraph, 8 an unbuildable insert.
+        const edited = `${legacy}\n\n* x`;
+
+        expect(() => put(base, edited, null, null, null)).toThrow("(line 8)");
+    });
+
     it("leaves an ordinary code block untouched", () => {
         const base = newADF(`{ "adf": { "type": "doc", "content": [
            { "type": "codeBlock", "attrs": { "language": "go" },
