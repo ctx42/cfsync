@@ -11,7 +11,11 @@ import { buildConfig, type Config } from "../../src/config/config.ts";
 import { ConfluenceClient } from "../../src/confluence/client.ts";
 import { obsidianFlavor } from "../../src/flavor/flavor.ts";
 import { NoopReporter, type Reporter } from "../../src/ports/progress.ts";
-import { buildLinkIndex, type LinkIndex } from "../../src/sync/linkindex.ts";
+import {
+    buildLinkIndex,
+    type LinkIndex,
+    loadLinkIndex,
+} from "../../src/sync/linkindex.ts";
 import {
     addStats,
     emptyStats,
@@ -1769,6 +1773,10 @@ describe("resolvePageSource", () => {
         // A stub with no routes: resolving from the index must not call out.
         const deps = sourceDeps(config, new StubHttpClient());
         await links.write(deps.fs, LINKS);
+        await deps.fs.write(
+            "/vault/docs/guide.md",
+            '---\npage_id: "7"\npage_version: 1\n---\nbody\n',
+        );
         const { src, spaceKey } = await resolvePageSource(
             deps,
             "/vault/docs/guide.md",
@@ -1912,5 +1920,141 @@ describe("helpers", () => {
         expect(
             pullSummary({ ...emptyStats(), total: 1, added: 1 }),
         ).not.toContain("show up as changes in git");
+    });
+});
+
+describe("stale link index after a local move", () => {
+    const LINKS = "/data/cache/links.json";
+    const SELF = "https://ex.atlassian.net/wiki/spaces/X/pages/1/T#Passkey";
+
+    /** selfLinkPage is page 1 at `version` linking to its own `Passkey` heading. */
+    function selfLinkPage(version: number): string {
+        return pageBody("1", version, {
+            version: 1,
+            type: "doc",
+            content: [
+                {
+                    type: "paragraph",
+                    content: [
+                        {
+                            type: "text",
+                            text: "Passkey",
+                            marks: [{ type: "link", attrs: { href: SELF } }],
+                        },
+                    ],
+                },
+            ],
+        });
+    }
+
+    /** staleIndex persists an index still naming page 1's pre-move path. */
+    async function staleIndex(fs: MemFS): Promise<void> {
+        await fs.write(
+            LINKS,
+            '[{"id": "1", "dest": "a/x.md", "url": "/wiki/spaces/X/pages/1", "title": ""}]\n',
+        );
+    }
+
+    /** pullMoved resolves and pulls b/x.md the way a status-row action does. */
+    async function pullMoved(fs: MemFS, overwrite: boolean): Promise<string> {
+        const config = testConfig({ "b/x.md": "/wiki/spaces/X/pages/1/T" });
+        const stub = new StubHttpClient().on("GET", pageURL("1"), {
+            body: selfLinkPage(3),
+        });
+        const client = new ConfluenceClient(stub, {
+            host: config.host,
+            account: config.account,
+            token: config.token,
+        });
+        const { src, spaceKey, links } = await resolvePageSource(
+            {
+                client,
+                fs,
+                config,
+                reporter: new NoopReporter(),
+                linksPath: LINKS,
+            },
+            "/vault/b/x.md",
+        );
+        const puller = new Puller({
+            client,
+            fs,
+            config,
+            reporter: new NoopReporter(),
+            cacheDir: "/data/cache",
+            assetsDir: "/vault/_cfsync-media",
+            links,
+            flavor: obsidianFlavor,
+            overwrite,
+        });
+        await puller.pullOne("/vault/b/x.md", src, spaceKey);
+        return fs.readText("/vault/b/x.md");
+    }
+
+    it("renders self-links to the moved note's path on overwrite", async () => {
+        const fs = new MemFS();
+        await staleIndex(fs);
+        await fs.write("/vault/b/x.md", managedNote("1", 3, "edited"));
+
+        const have = await pullMoved(fs, true);
+
+        expect(have).toContain("[Passkey](x.md#Passkey)");
+        expect(have).not.toContain("a/x.md");
+        const index = await loadLinkIndex(fs, LINKS, "/vault");
+        expect(index?.byID.get("1")?.dest).toBe("b/x.md");
+    });
+
+    it("renders self-links to the configured path when no note exists yet", async () => {
+        const fs = new MemFS();
+        await staleIndex(fs);
+
+        const have = await pullMoved(fs, false);
+
+        expect(have).toContain("[Passkey](x.md#Passkey)");
+    });
+});
+
+describe("pullConfig with discovery errors", () => {
+    it("merges the partial index over the previous one and says so", async () => {
+        const cfg = buildConfig(
+            {
+                pages: { "b/x.md": "/wiki/spaces/X/pages/1/T" },
+                folders: { docs: "/wiki/spaces/X/folder/100" },
+            },
+            {
+                site: "ex",
+                account: "a@ex.com",
+                token: "secret",
+                syncRoot: "/vault",
+            },
+        );
+        // No route for folder 100's children: its discovery fails.
+        const stub = new StubHttpClient().on("GET", pageURL("1"), {
+            body: pageBody("1", 2),
+        });
+        const fs = new MemFS();
+        await fs.write("/vault/docs/y.md", managedNote("5", 1, "y"));
+        await fs.write(
+            "/data/cache/links.json",
+            "[" +
+                '{"id": "1", "dest": "a/x.md", "url": "/wiki/spaces/X/pages/1", "title": ""},' +
+                '{"id": "5", "dest": "docs/y.md", "url": "/wiki/spaces/X/pages/5", "title": "Y"}' +
+                "]\n",
+        );
+
+        const have = await pullConfigWith(cfg, stub, fs);
+
+        expect(have.errors.length).toBeGreaterThan(0);
+        expect(have.log).toContain(
+            "warning: link index merged with the previous one: 1 discovery " +
+                "error(s), so the pages not discovered keep their last-known paths",
+        );
+        const index = await loadLinkIndex(
+            fs,
+            "/data/cache/links.json",
+            "/vault",
+        );
+        expect(index?.byID.get("1")?.dest).toBe("b/x.md");
+        expect(index?.byID.get("5")?.dest).toBe("docs/y.md");
     });
 });

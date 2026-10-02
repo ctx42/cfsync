@@ -64,7 +64,8 @@ import {
     type DiscoveredPage,
     type LinkIndex,
     linkMapper,
-    loadLinkIndex,
+    mergeLinkIndex,
+    openLinkIndex,
     pageName,
 } from "./linkindex.ts";
 import { hasConflictMarkers, mergeThreeWay } from "./merge.ts";
@@ -765,9 +766,11 @@ export interface PullConfigDeps {
  * pullConfig pulls every configured page and the pages of every configured folder
  * and space. It discovers the folder/space trees, aborts the whole run (throwing)
  * when any destination or Confluence page is claimed by more than one entry,
- * builds the link index (persisting it only when discovery was complete, so a
- * partial index never overwrites a good one), then pulls the configured and
- * discovered pages. Discovery and per-page failures are returned in
+ * builds and persists the link index, then pulls the configured and discovered
+ * pages. A discovery with errors saw only part of the tree, so its index is
+ * merged over the persisted one (healed against the notes on disk) rather than
+ * replacing it — the pages it missed keep their last-known paths — and the run
+ * says so. Discovery and per-page failures are returned in
  * {@link PullOutcome.errors}; the run still completes.
  */
 export async function pullConfig(deps: PullConfigDeps): Promise<PullOutcome> {
@@ -781,12 +784,23 @@ export async function pullConfig(deps: PullConfigDeps): Promise<PullOutcome> {
 
     collides(config, discovered); // throws to abort before any write
 
-    const links = buildLinkIndex(config.syncRoot, config.pages, discovered);
-    // Persist only when discovery was complete: a partial index written over a
-    // prior complete one would drop the failed entries' pages.
-    if (discErrors.length === 0) {
-        await links.write(fs, linksPath);
+    const fresh = buildLinkIndex(config.syncRoot, config.pages, discovered);
+    // A complete discovery is authoritative and replaces the index outright. A
+    // partial one would drop the failed roots' pages, so it is merged over the
+    // previous index instead, and the run reports that it was.
+    let indexLog = "";
+    let links = fresh;
+    if (discErrors.length > 0) {
+        const prior = await openLinkIndex(fs, linksPath, config.syncRoot);
+        links = mergeLinkIndex(fresh, prior.links);
+        indexLog =
+            prior.healed.join("") +
+            `warning: link index merged with the previous one: ` +
+            `${discErrors.length} discovery error(s), so the pages not ` +
+            "discovered keep their last-known paths\n";
+        reporter.log(indexLog);
     }
+    await links.write(fs, linksPath);
 
     // Reconcile notes left behind by a moved page before pulling: a partial tree
     // could misplace a note, so this runs only when discovery was complete.
@@ -840,7 +854,8 @@ export async function pullConfig(deps: PullConfigDeps): Promise<PullOutcome> {
     const stats = addStats(pagesOut.stats, treeOut.stats);
     stats.deleted = deleted.deleted;
     return {
-        log: relocated.log + pagesOut.log + treeOut.log + deleted.log,
+        log:
+            indexLog + relocated.log + pagesOut.log + treeOut.log + deleted.log,
         stats,
         errors: [...discErrors, ...pagesOut.errors, ...treeOut.errors],
     };
@@ -896,10 +911,12 @@ export interface ResolvedSource {
 /**
  * resolvePageSource returns the Confluence source URL and space key for the single
  * managed page at `dest` (an absolute note path), together with the link index to
- * pull it with. A configured `pages:` entry resolves straight from the config (no
- * space key). Otherwise the page is a descendant of a configured folder or space
- * root, whose remote URL is only known through the link index: when the persisted
- * index already carries `dest` it is used as is; when the index is missing or
+ * pull it with. The persisted index is first healed against the notes on disk
+ * (see {@link healedIndex}), so a locally moved page links to where it now is. A
+ * configured `pages:` entry resolves straight from the config (no space key).
+ * Otherwise the page is a descendant of a configured folder or space
+ * root, whose remote URL is only known through the link index: when the
+ * index already carries `dest` it is used; when the index is missing or
  * lacks `dest`, the one root that contains `dest` is discovered on the spot (not
  * the whole config), its pages merged into and re-persisted over the existing
  * index, and `dest` resolved from the result. It throws when `dest` lies under no
@@ -909,8 +926,8 @@ export async function resolvePageSource(
     deps: ResolveSourceDeps,
     dest: string,
 ): Promise<ResolvedSource> {
-    const { config, fs, linksPath } = deps;
-    const links = await loadLinkIndex(fs, linksPath, config.syncRoot);
+    const { config } = deps;
+    const links = await healedIndex(deps);
 
     const configured = config.pages[dest];
     if (configured !== undefined) {
@@ -966,18 +983,56 @@ async function discoverContainingRoot(
             ? await discoverFolder(client, config, quiet, found.src, found.root)
             : await discoverSpace(client, config, quiet, found.src, found.root);
 
-    const links = buildLinkIndex(config.syncRoot, config.pages, result.pages);
     // Carry the other roots' entries (from a prior full pull) forward; the
     // freshly discovered root is authoritative for its own ids and dests.
-    if (existing !== null) {
-        for (const e of existing.entries()) {
-            const abs = posixJoin(config.syncRoot, e.dest);
-            if (!links.byID.has(e.id) && !links.byDest.has(abs)) {
-                links.add(e);
-            }
-        }
-    }
+    const links = mergeLinkIndex(
+        buildLinkIndex(config.syncRoot, config.pages, result.pages),
+        existing,
+    );
     await links.write(fs, linksPath);
+    return links;
+}
+
+/**
+ * healedIndex loads the persisted link index for a single-page run, healed
+ * against the notes on disk, with the configured `pages:` entries laid over it:
+ * the config names each configured page's current path, so a page the user moved
+ * (note and config), or one newly configured, links to its current path without
+ * waiting for a full pull. Heal lines are logged and any change is persisted.
+ * It resolves to null when no index exists.
+ */
+async function healedIndex(deps: ResolveSourceDeps): Promise<LinkIndex | null> {
+    const { config, fs, reporter, linksPath } = deps;
+    const { links, healed } = await openLinkIndex(
+        fs,
+        linksPath,
+        config.syncRoot,
+    );
+    if (links === null) {
+        return null;
+    }
+    for (const line of healed) {
+        reporter.log(line);
+    }
+    let moved = false;
+    for (const e of buildLinkIndex(
+        config.syncRoot,
+        config.pages,
+        [],
+    ).entries()) {
+        const prior = links.byID.get(e.id);
+        if (prior?.dest === e.dest) {
+            continue;
+        }
+        if (prior !== undefined) {
+            links.remove(prior);
+        }
+        links.add(prior === undefined ? e : { ...prior, dest: e.dest });
+        moved = true;
+    }
+    if (moved) {
+        await links.write(fs, linksPath);
+    }
     return links;
 }
 

@@ -19,6 +19,7 @@ import {
     posixJoin,
     posixRel,
 } from "../util/path.ts";
+import { mdFilesUnder } from "./fswalk.ts";
 
 /**
  * LinkEntry records one pulled page: its Confluence id, its Markdown destination
@@ -78,6 +79,18 @@ export class LinkIndex {
     add(entry: LinkEntry): void {
         this.byID.set(entry.id, entry);
         this.byDest.set(posixJoin(this.syncRoot, entry.dest), entry);
+    }
+
+    /**
+     * remove drops one entry from both maps. The destination slot is cleared only
+     * while it still holds this entry, so a later entry at the same path survives.
+     */
+    remove(entry: LinkEntry): void {
+        this.byID.delete(entry.id);
+        const abs = posixJoin(this.syncRoot, entry.dest);
+        if (this.byDest.get(abs) === entry) {
+            this.byDest.delete(abs);
+        }
     }
 
     /** entries returns the index entries sorted by destination, for a stable file. */
@@ -188,6 +201,159 @@ export async function loadLinkIndex(
         });
     }
     return idx;
+}
+
+/**
+ * OpenedLinkIndex is a loaded and healed link index plus one log line per entry
+ * the heal changed.
+ */
+export interface OpenedLinkIndex {
+    links: LinkIndex | null;
+    /** What {@link healLinkIndex} changed, one `\n`-terminated line each. */
+    healed: string[];
+}
+
+/**
+ * openLinkIndex loads the persisted index from `path`, heals it against the notes
+ * on disk ({@link healLinkIndex}), and re-persists it when the heal changed
+ * anything — so every reader (pull, push, status) sees the notes' current paths
+ * and a later reader of the file does not heal the same entries again.
+ */
+export async function openLinkIndex(
+    fs: FileSystem,
+    path: string,
+    syncRoot: string,
+): Promise<OpenedLinkIndex> {
+    const links = await loadLinkIndex(fs, path, syncRoot);
+    if (links === null) {
+        return { links, healed: [] };
+    }
+    const healed = await healLinkIndex(fs, links);
+    if (healed.length > 0) {
+        await links.write(fs, path);
+    }
+    return { links, healed };
+}
+
+/**
+ * healLinkIndex reconciles the index with the notes on disk, which are the
+ * source of truth for a page's local path: a note carries its page's `page_id`
+ * in its frontmatter. An entry is stale when no file exists at its `dest`, or
+ * the note there names a different page. A stale entry is re-pointed at the one
+ * note under the sync root that carries its id — the page was moved locally — or
+ * dropped when no note (or more than one) does, so a link to it renders as its
+ * Confluence URL rather than toward a missing or wrong file. A note without a
+ * readable `page_id` keeps its entry: it cannot disprove it. The vault is scanned
+ * only when an entry is stale. It returns one log line per changed entry.
+ */
+export async function healLinkIndex(
+    fs: FileSystem,
+    idx: LinkIndex,
+): Promise<string[]> {
+    const stale: LinkEntry[] = [];
+    for (const e of idx.entries()) {
+        const abs = posixJoin(idx.syncRoot, e.dest);
+        if (!(await fs.exists(abs))) {
+            stale.push(e);
+            continue;
+        }
+        const id = await notePageID(fs, abs);
+        if (id !== "" && id !== e.id) {
+            stale.push(e);
+        }
+    }
+    if (stale.length === 0) {
+        return [];
+    }
+
+    const notes = await notesByPageID(fs, idx.syncRoot);
+    const lines: string[] = [];
+    for (const e of stale) {
+        idx.remove(e);
+        const paths = notes.get(e.id) ?? [];
+        const [only] = paths;
+        if (paths.length === 1 && only !== undefined) {
+            const dest = pageName(idx.syncRoot, only);
+            idx.add({ ...e, dest });
+            lines.push(
+                `link index: page ${e.id} moved locally: ${e.dest} -> ${dest}\n`,
+            );
+            continue;
+        }
+        const why =
+            paths.length === 0
+                ? "no local note carries it"
+                : `${paths.length} local notes carry it`;
+        lines.push(`link index: dropped page ${e.id} (${e.dest}): ${why}\n`);
+    }
+    return lines;
+}
+
+/**
+ * mergeLinkIndex adds to `fresh` every entry of `existing` that `fresh` does not
+ * already claim by id or destination, so a partial rebuild (one root, or a
+ * discovery with errors) never drops the pages it did not see. `fresh` stays
+ * authoritative for its own ids and dests. It returns `fresh`.
+ */
+export function mergeLinkIndex(
+    fresh: LinkIndex,
+    existing: LinkIndex | null,
+): LinkIndex {
+    if (existing === null) {
+        return fresh;
+    }
+    for (const e of existing.entries()) {
+        const abs = posixJoin(fresh.syncRoot, e.dest);
+        if (!fresh.byID.has(e.id) && !fresh.byDest.has(abs)) {
+            fresh.add(e);
+        }
+    }
+    return fresh;
+}
+
+/**
+ * notesByPageID maps every `page_id` found in a note under `syncRoot` to the
+ * notes carrying it. Hidden directories (`.trash`, `.obsidian`, …) are skipped:
+ * a deleted copy must not claim a page.
+ */
+async function notesByPageID(
+    fs: FileSystem,
+    syncRoot: string,
+): Promise<Map<string, string[]>> {
+    const out = new Map<string, string[]>();
+    for (const path of await mdFilesUnder(fs, [syncRoot])) {
+        const rel = pageName(syncRoot, path);
+        if (rel.split("/").some((seg) => seg.startsWith("."))) {
+            continue;
+        }
+        const id = await notePageID(fs, path);
+        if (id === "") {
+            continue;
+        }
+        const list = out.get(id) ?? [];
+        list.push(path);
+        out.set(id, list);
+    }
+    return out;
+}
+
+/**
+ * notePageID reads the `page_id` from the frontmatter of the note at `path`, or
+ * `""` when the note is unreadable, has no frontmatter, or names no page.
+ */
+async function notePageID(fs: FileSystem, path: string): Promise<string> {
+    let text: string;
+    try {
+        text = await fs.readText(path);
+    } catch {
+        return "";
+    }
+    const fm = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text)?.[1];
+    if (fm === undefined) {
+        return "";
+    }
+    const m = /^page_id:[ \t]*(?:"([^"]*)"|'([^']*)'|(\S*))[ \t]*$/m.exec(fm);
+    return m?.[1] ?? m?.[2] ?? m?.[3] ?? "";
 }
 
 /**

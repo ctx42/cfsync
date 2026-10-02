@@ -17,7 +17,7 @@ import type { Reporter } from "../ports/progress.ts";
 import type { Yaml } from "../ports/yaml.ts";
 import { clearIgnorePush, markIgnorePush } from "./create.ts";
 import type { MintLocalId } from "./images.ts";
-import { loadLinkIndex, pageName } from "./linkindex.ts";
+import { openLinkIndex, pageName } from "./linkindex.ts";
 import { Puller, resolvePageSource } from "./pull.ts";
 import { Pusher, planCreates } from "./push.ts";
 import type { StatusReport } from "./status.ts";
@@ -259,7 +259,8 @@ async function pushRows(d: ActionDeps, cs: Choice[]): Promise<ActionResult[]> {
             cacheDir: d.cacheDir,
             assetsDir: d.assetsDir,
             mintLocalId: d.mintLocalId,
-            links: await loadLinkIndex(d.fs, d.linksPath, d.config.syncRoot),
+            links: (await openLinkIndex(d.fs, d.linksPath, d.config.syncRoot))
+                .links,
             flavor: d.flavor,
         });
         const outcome = await pusher.pushDests(dests, plan);

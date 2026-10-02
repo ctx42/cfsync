@@ -11,10 +11,10 @@ import {
     applyActions,
     type Choice,
     collectStatus,
-    loadLinkIndex,
     MetaCache,
     managedPushDests,
     markIgnorePush,
+    openLinkIndex,
     type PageAction,
     type PreflightDeps,
     type PreflightEntry,
@@ -168,11 +168,9 @@ async function preflightDeps(rt: PluginRuntime): Promise<PreflightDeps> {
         config: rt.config,
         cacheDir: rt.dirs.cacheDir,
         flavor: resolveFlavor(rt.config.flavor),
-        links: await loadLinkIndex(
-            rt.fs,
-            rt.dirs.linksPath,
-            rt.config.syncRoot,
-        ),
+        links: (
+            await openLinkIndex(rt.fs, rt.dirs.linksPath, rt.config.syncRoot)
+        ).links,
     };
 }
 
@@ -182,11 +180,14 @@ export async function pushSelected(
     reporter: Reporter,
     dests: string[],
 ): Promise<PushOutcome> {
-    const links = await loadLinkIndex(
+    const { links, healed } = await openLinkIndex(
         rt.fs,
         rt.dirs.linksPath,
         rt.config.syncRoot,
     );
+    for (const line of healed) {
+        reporter.log(line);
+    }
     // The user already chose these in the preview, so confirm every create.
     const plan = await planCreates(
         { client: rt.client, fs: rt.fs, yaml: rt.yaml, config: rt.config },

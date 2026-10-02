@@ -22,9 +22,9 @@ import {
     type FileSystem,
     findStale,
     isClean,
-    loadLinkIndex,
     MetaCache,
     managedPushDests,
+    openLinkIndex,
     overwrites,
     type PageAction,
     type PreflightEntry,
@@ -202,11 +202,14 @@ export async function runPush(
     force: boolean,
     dropComments: boolean,
 ): Promise<CommandResult> {
-    const links = await loadLinkIndex(
+    const { links, healed } = await openLinkIndex(
         d.fs,
         d.dirs.linksPath,
         d.config.syncRoot,
     );
+    for (const line of healed) {
+        d.reporter.log(line);
+    }
     // One frontmatter cache spans discovery and create-planning so each note is
     // read once, not once per phase.
     const cache = new MetaCache();
@@ -284,11 +287,13 @@ export async function runStatus(
                 config: d.config,
                 cacheDir: d.dirs.cacheDir,
                 flavor: resolveFlavor(d.config.flavor),
-                links: await loadLinkIndex(
-                    d.fs,
-                    d.dirs.linksPath,
-                    d.config.syncRoot,
-                ),
+                links: (
+                    await openLinkIndex(
+                        d.fs,
+                        d.dirs.linksPath,
+                        d.config.syncRoot,
+                    )
+                ).links,
             },
             opts,
         );

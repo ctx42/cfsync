@@ -9,8 +9,11 @@ import { describe, expect, it } from "vitest";
 import {
     buildLinkIndex,
     DocLinks,
+    healLinkIndex,
     LinkIndex,
     loadLinkIndex,
+    mergeLinkIndex,
+    openLinkIndex,
     pageURL,
 } from "../../src/sync/linkindex.ts";
 import { MemFS } from "../support/memfs.ts";
@@ -288,5 +291,175 @@ describe("DocLinks.toRemote", () => {
         ).toBe(
             "https://s.atlassian.net/wiki/pages/viewpage.action?pageId=456#intro",
         );
+    });
+});
+
+/** note is a managed note whose frontmatter names page `id`. */
+function note(id: string): string {
+    return `---\ncfsync-plugin: pull\npage_id: "${id}"\npage_version: 1\n---\nbody\n`;
+}
+
+/** entry is an index entry for page `id` at `dest`. */
+function entry(id: string, dest: string) {
+    return {
+        id,
+        dest,
+        url: `/wiki/spaces/X/pages/${id}`,
+        title: "",
+        spaceKey: "",
+    };
+}
+
+describe("healLinkIndex", () => {
+    it("keeps an entry whose note carries its page id", async () => {
+        const fs = new MemFS();
+        await fs.write("/wd/a/x.md", note("1"));
+        const idx = new LinkIndex("/wd");
+        idx.add(entry("1", "a/x.md"));
+
+        const have = await healLinkIndex(fs, idx);
+
+        expect(have).toEqual([]);
+        expect(idx.byID.get("1")?.dest).toBe("a/x.md");
+    });
+
+    it("re-points an entry at the note that moved locally", async () => {
+        const fs = new MemFS();
+        await fs.write("/wd/b/x.md", note("1"));
+        const idx = new LinkIndex("/wd");
+        idx.add(entry("1", "a/x.md"));
+
+        const have = await healLinkIndex(fs, idx);
+
+        expect(have).toEqual([
+            "link index: page 1 moved locally: a/x.md -> b/x.md\n",
+        ]);
+        expect(idx.byID.get("1")?.dest).toBe("b/x.md");
+        expect(idx.byDest.has("/wd/a/x.md")).toBe(false);
+        expect(idx.byDest.get("/wd/b/x.md")?.id).toBe("1");
+    });
+
+    it("re-points an entry whose dest now holds another page", async () => {
+        const fs = new MemFS();
+        await fs.write("/wd/a/x.md", note("2"));
+        await fs.write("/wd/b/x.md", note("1"));
+        const idx = new LinkIndex("/wd");
+        idx.add(entry("1", "a/x.md"));
+
+        await healLinkIndex(fs, idx);
+
+        expect(idx.byID.get("1")?.dest).toBe("b/x.md");
+    });
+
+    it("drops an entry no note carries", async () => {
+        const fs = new MemFS();
+        const idx = new LinkIndex("/wd");
+        idx.add(entry("1", "a/x.md"));
+
+        const have = await healLinkIndex(fs, idx);
+
+        expect(have).toEqual([
+            "link index: dropped page 1 (a/x.md): no local note carries it\n",
+        ]);
+        expect(idx.byID.size).toBe(0);
+        expect(idx.byDest.size).toBe(0);
+    });
+
+    it("drops an entry several notes carry", async () => {
+        const fs = new MemFS();
+        await fs.write("/wd/b/x.md", note("1"));
+        await fs.write("/wd/c/x.md", note("1"));
+        const idx = new LinkIndex("/wd");
+        idx.add(entry("1", "a/x.md"));
+
+        const have = await healLinkIndex(fs, idx);
+
+        expect(have).toEqual([
+            "link index: dropped page 1 (a/x.md): 2 local notes carry it\n",
+        ]);
+        expect(idx.byID.has("1")).toBe(false);
+    });
+
+    it("keeps an entry whose note has no page id", async () => {
+        const fs = new MemFS();
+        await fs.write("/wd/a/x.md", "no frontmatter\n");
+        const idx = new LinkIndex("/wd");
+        idx.add(entry("1", "a/x.md"));
+
+        expect(await healLinkIndex(fs, idx)).toEqual([]);
+        expect(idx.byID.get("1")?.dest).toBe("a/x.md");
+    });
+
+    it("ignores copies in hidden directories", async () => {
+        const fs = new MemFS();
+        await fs.write("/wd/.trash/x.md", note("1"));
+        await fs.write("/wd/b/x.md", note("1"));
+        const idx = new LinkIndex("/wd");
+        idx.add(entry("1", "a/x.md"));
+
+        await healLinkIndex(fs, idx);
+
+        expect(idx.byID.get("1")?.dest).toBe("b/x.md");
+    });
+});
+
+describe("openLinkIndex", () => {
+    const LINKS = "/wd/.adf_cache/links.json";
+
+    it("persists the healed index", async () => {
+        const fs = new MemFS();
+        await fs.write("/wd/b/x.md", note("1"));
+        const idx = new LinkIndex("/wd");
+        idx.add(entry("1", "a/x.md"));
+        await idx.write(fs, LINKS);
+
+        const have = await openLinkIndex(fs, LINKS, "/wd");
+
+        expect(have.healed).toHaveLength(1);
+        expect(have.links?.byID.get("1")?.dest).toBe("b/x.md");
+        const reloaded = await loadLinkIndex(fs, LINKS, "/wd");
+        expect(reloaded?.byID.get("1")?.dest).toBe("b/x.md");
+    });
+
+    it("leaves a sound index file untouched", async () => {
+        const fs = new MemFS();
+        await fs.write("/wd/a/x.md", note("1"));
+        await fs.write(LINKS, '[\n  {"id": "1", "dest": "a/x.md"}\n]\n');
+
+        const have = await openLinkIndex(fs, LINKS, "/wd");
+
+        expect(have.healed).toEqual([]);
+        expect(await fs.readText(LINKS)).toBe(
+            '[\n  {"id": "1", "dest": "a/x.md"}\n]\n',
+        );
+    });
+
+    it("resolves to a null index when no file exists", async () => {
+        const have = await openLinkIndex(new MemFS(), LINKS, "/wd");
+        expect(have).toEqual({ links: null, healed: [] });
+    });
+});
+
+describe("mergeLinkIndex", () => {
+    it("keeps the existing entries the fresh index does not claim", () => {
+        const fresh = new LinkIndex("/wd");
+        fresh.add(entry("1", "b/x.md"));
+        const existing = new LinkIndex("/wd");
+        existing.add(entry("1", "a/x.md"));
+        existing.add(entry("2", "b/x.md"));
+        existing.add(entry("3", "c/z.md"));
+
+        const have = mergeLinkIndex(fresh, existing);
+
+        expect(have.entries().map((e) => `${e.id}=${e.dest}`)).toEqual([
+            "1=b/x.md",
+            "3=c/z.md",
+        ]);
+    });
+
+    it("returns the fresh index without an existing one", () => {
+        const fresh = new LinkIndex("/wd");
+        fresh.add(entry("1", "b/x.md"));
+        expect(mergeLinkIndex(fresh, null)).toBe(fresh);
     });
 });
