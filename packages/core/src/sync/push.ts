@@ -66,7 +66,12 @@ import {
     type UploadedImage,
     uploadNewImages,
 } from "./images.ts";
-import { type LinkIndex, linkMapper, pageName } from "./linkindex.ts";
+import {
+    type DocLinks,
+    type LinkIndex,
+    linkMapper,
+    pageName,
+} from "./linkindex.ts";
 import { hasConflictMarkers } from "./merge.ts";
 
 /** PageImage is one entry of the `page_images` frontmatter list. */
@@ -491,7 +496,7 @@ export class Pusher {
                             "create candidate has no resolved input",
                         );
                     }
-                    const { version, reused } = await this.pushCreate(
+                    const { version, reused, warning } = await this.pushCreate(
                         dest,
                         input,
                         plan?.accountId ?? "",
@@ -501,6 +506,10 @@ export class Pusher {
                     let line = `creating ${name} ... ok (v${version})\n`;
                     for (const title of reused) {
                         line += `      reused existing folder "${title}"\n`;
+                    }
+                    if (warning !== "") {
+                        line += `      warning: ${warning}\n`;
+                        out.warnings.push(`${name}: ${warning}`);
                     }
                     out.log += line;
                     this.d.reporter.log(line);
@@ -556,7 +565,7 @@ export class Pusher {
         input: CreateInput,
         accountId: string,
         folderIds: Map<string, string>,
-    ): Promise<{ version: number; reused: string[] }> {
+    ): Promise<{ version: number; reused: string[]; warning: string }> {
         const { parent, created, reused } = await ensureFolders(
             this.d.client,
             input,
@@ -686,7 +695,7 @@ export class Pusher {
             this.d.config.margin,
             this.d.flavor,
         );
-        return { version, reused };
+        return { version, reused, warning: unmappedWarning(links) };
     }
 
     /**
@@ -825,7 +834,11 @@ export class Pusher {
             uploaded = [];
             meta.pageVersion = pushed.version;
             const res = await this.resolveAll(resolutions);
-            let warning = joinWarnings(pushed.warning, res.warning);
+            let warning = joinWarnings(
+                pushed.warning,
+                res.warning,
+                unmappedWarning(links),
+            );
             try {
                 await stampPushedVersion(this.d.fs, dest, pushed.version);
                 await canonicalizeImages(
@@ -1658,6 +1671,23 @@ async function refreshAfterPush(
     if (comments) {
         await writeRecord(fs, cacheDir, name, recordThreads(comments, doc));
     }
+}
+
+/**
+ * unmappedWarning names the local `.md` link targets the push could not map to
+ * a Confluence page (see {@link DocLinks.unmapped}): they reached the page as
+ * literal relative hrefs, which resolve nowhere — typically a stale link to a
+ * moved note, or to a local note never pushed. Empty when there are none.
+ */
+function unmappedWarning(links: DocLinks | null): string {
+    if (links === null || links.unmapped.size === 0) {
+        return "";
+    }
+    const targets = [...links.unmapped].sort().join(", ");
+    return (
+        "link target(s) map to no Confluence page and were pushed as " +
+        `relative hrefs: ${targets}`
+    );
 }
 
 /** joinWarnings joins non-empty warnings with `; `. */

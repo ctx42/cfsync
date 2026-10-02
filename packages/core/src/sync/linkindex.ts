@@ -367,7 +367,7 @@ export function linkMapper(
     dest: string,
     host: string,
     site: string,
-): Links | null {
+): DocLinks | null {
     if (idx === null) {
         return null;
     }
@@ -381,6 +381,12 @@ export function linkMapper(
  * href.
  */
 export class DocLinks implements Links {
+    /**
+     * The local `.md` targets {@link toRemote} could not map to an indexed page,
+     * which a push therefore sends as literal relative hrefs.
+     */
+    readonly unmapped = new Set<string>();
+
     constructor(
         private readonly idx: LinkIndex,
         private readonly dir: string,
@@ -414,7 +420,8 @@ export class DocLinks implements Links {
     /**
      * toRemote maps a sync-root-relative Markdown target back to the absolute
      * Confluence URL of the page it names, preserving any `#fragment`. A target
-     * that is not a local path to an indexed page is left unchanged.
+     * that is not a local path to an indexed page is left unchanged; a `.md` one
+     * is also recorded in {@link unmapped} so the push can flag it.
      */
     toRemote(target: string): string | undefined {
         const [path, frag] = cutFragment(target);
@@ -423,6 +430,9 @@ export class DocLinks implements Links {
         }
         const entry = this.idx.byDest.get(posixJoin(this.dir, path));
         if (entry === undefined) {
+            if (path.endsWith(".md")) {
+                this.unmapped.add(path);
+            }
             return undefined;
         }
         let href = this.pageHref(entry);

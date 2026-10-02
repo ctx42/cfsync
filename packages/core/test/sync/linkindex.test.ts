@@ -463,3 +463,16 @@ describe("mergeLinkIndex", () => {
         expect(mergeLinkIndex(fresh, null)).toBe(fresh);
     });
 });
+
+describe("DocLinks.unmapped", () => {
+    it("records a local .md target that maps to no page", () => {
+        const links = docLinks();
+
+        expect(links.toRemote("../wip/gone.md#Passkey")).toBeUndefined();
+        expect(links.toRemote("../glossary/bar.md")).toBeDefined();
+        expect(links.toRemote("https://x.example/a.md")).toBeUndefined();
+        expect(links.toRemote("../_assets/pic.png")).toBeUndefined();
+
+        expect([...links.unmapped]).toEqual(["../wip/gone.md"]);
+    });
+});

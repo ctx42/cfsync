@@ -315,6 +315,35 @@ describe("Pusher.pushOne", () => {
         expect(await fs.readText("/vault/p.md")).toContain("edited");
     });
 
+    it("warns about a local .md link that maps to no page", async () => {
+        const fs = new MemFS();
+        await fs.write(
+            "/vault/p.md",
+            note(3, "see [Other](other.md) and [Gone](wip/gone.md#Top)"),
+        );
+        await fs.write("/data/cache/p.v3.json", cacheWrapper(3, baseDoc));
+        const stub = new StubHttpClient()
+            .on("GET", pageURL, { body: livePage(3, baseDoc) })
+            .on("PUT", putURL, { status: 200 });
+        const idx = new LinkIndex("/vault");
+        idx.add({
+            id: "42",
+            dest: "other.md",
+            url: "/wiki/spaces/X/pages/42",
+            title: "Other",
+            spaceKey: "X",
+        });
+
+        const have = await pusherFor(stub, fs, idx).pushDests(["/vault/p.md"]);
+
+        expect(have.errors).toEqual([]);
+        expect(have.warnings).toEqual([
+            "p.md: link target(s) map to no Confluence page and were pushed " +
+                "as relative hrefs: wip/gone.md",
+        ]);
+        expect(have.log).toContain("      warning: link target(s)");
+    });
+
     it("skips a note with no changes", async () => {
         const fs = new MemFS();
         await fs.write("/vault/p.md", note(3, "original"));
