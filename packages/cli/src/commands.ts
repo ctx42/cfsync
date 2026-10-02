@@ -486,8 +486,9 @@ function firstLine(s: string): string {
 }
 
 /**
- * runGc reports orphaned files in the shared assets directory, deleting them when
- * `prune` is set. It refuses to prune when a managed note is unreadable.
+ * runGc reports orphaned files in the shared assets directory and ADF cache
+ * entries of notes that no longer exist, deleting them when `prune` is set. It
+ * refuses to prune assets when a managed note is unreadable.
  */
 export async function runGc(
     d: CliDeps,
@@ -499,6 +500,7 @@ export async function runGc(
             yaml: d.yaml,
             config: d.config,
             assetsDir: d.dirs.assetsDir,
+            cacheDir: d.dirs.cacheDir,
         },
         prune,
     );

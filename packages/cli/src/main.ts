@@ -491,10 +491,11 @@ const COMMAND_USAGE: Record<ConfigCommand, string> = {
         "\nUsage:\n  cfsync gc [flags]\n" +
         "\n" +
         "List orphaned files in the shared _cfsync-media directory (those no page\n" +
-        "references). Add --prune to delete them.\n" +
+        "references), and ADF cache entries of notes that no longer exist (left\n" +
+        "by a local move or delete). Add --prune to delete them.\n" +
         "\nFlags:\n" +
         FLAGS_COMMON +
-        "  --prune             Delete the orphaned asset files.\n",
+        "  --prune             Delete the orphaned asset and cache files.\n",
     clean:
         "cfsync clean — remove local files no longer in Confluence.\n" +
         "\nUsage:\n  cfsync clean [flags]\n" +

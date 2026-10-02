@@ -106,3 +106,58 @@ describe("collectGarbage", () => {
         expect(await fs.exists("/vault/_cfsync-media/orphan.png")).toBe(true);
     });
 });
+
+describe("collectGarbage cache entries", () => {
+    /** withCache seeds the cache of a live note and of one moved away. */
+    async function withCache(): Promise<{ d: GcDeps; fs: MemFS }> {
+        const cfg = config({ pages: { "b/x.md": "/wiki/spaces/X/pages/1/A" } });
+        const fs = new MemFS();
+        await fs.write("/vault/b/x.md", note("1"));
+        for (const name of ["b/x", "wip/srd/x"]) {
+            await fs.write(`/data/cache/${name}.v3.json`, "{}");
+            await fs.write(`/data/cache/${name}.v3.md`, "md");
+            await fs.write(`/data/cache/${name}.comments.json`, "[]");
+        }
+        await fs.write("/data/cache/links.json", "[]\n");
+        return { d: { ...deps(cfg, fs), cacheDir: "/data/cache" }, fs };
+    }
+
+    it("reports the cache entries of notes that no longer exist", async () => {
+        const { d } = await withCache();
+
+        const have = await collectGarbage(d, false);
+
+        expect(have.orphanCache).toEqual([
+            "/data/cache/wip/srd/x.comments.json",
+            "/data/cache/wip/srd/x.v3.json",
+            "/data/cache/wip/srd/x.v3.md",
+        ]);
+        expect(have.report).toContain(
+            "3 orphaned cache file(s) for notes that no longer exist:\n" +
+                "  wip/srd/x.comments.json\n",
+        );
+    });
+
+    it("prunes them, keeping the live note's cache and the link index", async () => {
+        const { d, fs } = await withCache();
+
+        const have = await collectGarbage(d, true);
+
+        expect(have.report).toContain(
+            "cfsync: pruned 3 orphaned cache file(s)\n",
+        );
+        expect(await fs.exists("/data/cache/wip/srd/x.v3.json")).toBe(false);
+        expect(await fs.exists("/data/cache/b/x.v3.json")).toBe(true);
+        expect(await fs.exists("/data/cache/b/x.comments.json")).toBe(true);
+        expect(await fs.exists("/data/cache/links.json")).toBe(true);
+    });
+
+    it("skips the cache without a cache dir", async () => {
+        const { d } = await withCache();
+        const { cacheDir: _, ...noCache } = d;
+
+        const have = await collectGarbage(noCache, false);
+
+        expect(have.orphanCache).toEqual([]);
+    });
+});
