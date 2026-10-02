@@ -10,12 +10,14 @@
 import {
     ACTION_LABELS,
     type Choice,
+    describeHolder,
     isClean,
     overwrites,
     type PageAction,
     type PreflightEntry,
     pageName,
     type RowAction,
+    RunLockError,
     rowActions,
     type StatusReport,
     type StatusRow,
@@ -63,6 +65,9 @@ export class cfsyncView extends ItemView {
     // separate flag protects the open preview from being wiped by a stray
     // setScope/render(null) and refuses a new run until it is resolved.
     private previewPending = false;
+    // repaint redraws the last result painted (a run's final state or a status
+    // report), so a run refused by the lock can put it back marked stale.
+    private repaint: (() => void) | null = null;
 
     constructor(
         leaf: WorkspaceLeaf,
@@ -157,6 +162,7 @@ export class cfsyncView extends ItemView {
         if (dest !== undefined) this.opScope = "current";
         if (this.busy) return;
         this.busy = true;
+        const prev = this.repaint;
         this.render(null); // disable the header buttons during pre-flight
         let entries: PreflightEntry[];
         try {
@@ -165,14 +171,16 @@ export class cfsyncView extends ItemView {
                 this.plugin.settings,
                 this.plugin.token,
             );
-            entries = await preflight(
-                rt,
-                this.opScope,
-                dest ?? this.activeDest(),
+            entries = await rt.withLock("push preflight", () =>
+                preflight(rt, this.opScope, dest ?? this.activeDest()),
             );
         } catch (err) {
-            new Notice(`cfsync: ${message(err)}`);
             this.busy = false;
+            if (err instanceof RunLockError) {
+                this.showLocked(err, prev);
+                return;
+            }
+            new Notice(`cfsync: ${message(err)}`);
             this.render(null);
             return;
         }
@@ -204,6 +212,7 @@ export class cfsyncView extends ItemView {
     ): Promise<void> {
         if (this.busy) return;
         this.busy = true;
+        const prev = this.repaint;
         const reporter = new PanelReporter(verb, (s) => this.render(s));
         try {
             const rt = buildRuntime(
@@ -211,9 +220,14 @@ export class cfsyncView extends ItemView {
                 this.plugin.settings,
                 this.plugin.token,
             );
-            await op(rt, reporter);
+            await rt.withLock(verb, () => op(rt, reporter));
             reporter.finish();
         } catch (err) {
+            if (err instanceof RunLockError) {
+                this.busy = false;
+                this.showLocked(err, prev);
+                return;
+            }
             // Finish the run into the error phase rather than blanking the
             // panel: it keeps the accumulated log/counts of pages that already
             // succeeded and stops the progress bar from freezing mid-flight.
@@ -222,6 +236,27 @@ export class cfsyncView extends ItemView {
         }
         this.busy = false;
         this.render(reporter.state());
+    }
+
+    /**
+     * showLocked reports a run refused because another run — typically the CLI —
+     * holds the lock: a notice naming the holder, and the last result put back
+     * (`prev`, or the idle panel) under a banner marking it stale. Nothing
+     * retries; the user runs again once the other run is done.
+     */
+    private showLocked(err: RunLockError, prev: (() => void) | null): void {
+        const holder = describeHolder(err.holder);
+        new Notice(`cfsync: busy: ${holder}`);
+        if (prev !== null) {
+            prev();
+        } else {
+            this.render(null);
+        }
+        const banner = createDiv({
+            cls: "cfsync-stale",
+            text: `Stale: ${holder} is running. Showing the last result.`,
+        });
+        this.contentEl.prepend(banner);
     }
 
     /** activeDest returns the active note's dest, or null when none is open. */
@@ -234,6 +269,7 @@ export class cfsyncView extends ItemView {
      * RunState. It always fully rebuilds the panel: PanelReporter mutates and
      * re-emits a single shared RunState, so a diff render would show stale rows. */
     private render(state: RunState | null): void {
+        if (state !== null) this.repaint = () => this.render(state);
         const root = this.contentEl;
         root.empty();
         root.addClass("cfsync-panel");
@@ -522,6 +558,7 @@ export class cfsyncView extends ItemView {
         if (this.refusePending()) return;
         if (this.busy) return;
         this.busy = true;
+        const prev = this.repaint;
         this.render(null); // disable the header buttons during the check
         let report: StatusReport;
         try {
@@ -530,10 +567,14 @@ export class cfsyncView extends ItemView {
                 this.plugin.settings,
                 this.plugin.token,
             );
-            report = await vaultStatus(rt);
+            report = await rt.withLock("status", () => vaultStatus(rt));
         } catch (err) {
-            new Notice(`cfsync: ${message(err)}`);
             this.busy = false;
+            if (err instanceof RunLockError) {
+                this.showLocked(err, prev);
+                return;
+            }
+            new Notice(`cfsync: ${message(err)}`);
             this.render(null);
             return;
         }
@@ -548,6 +589,7 @@ export class cfsyncView extends ItemView {
         showIgnored: boolean,
         picked: Map<string, RowAction> = new Map(),
     ): void {
+        this.repaint = () => this.renderStatus(report, showIgnored, picked);
         const root = this.contentEl;
         root.empty();
         root.addClass("cfsync-panel");

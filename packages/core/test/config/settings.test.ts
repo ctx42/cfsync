@@ -7,7 +7,11 @@ import {
     buildPluginConfig,
     type cfsyncSettings,
     DEFAULT_SETTINGS,
-} from "../../src/settings/model.ts";
+    mergeSettings,
+    parseSettings,
+    SETTINGS_SCHEMA_VERSION,
+    SettingsVersionError,
+} from "../../src/config/settings.ts";
 
 function valid(overrides: Partial<cfsyncSettings> = {}): cfsyncSettings {
     return {
@@ -65,5 +69,55 @@ describe("buildPluginConfig", () => {
         expect(() => buildPluginConfig(valid({ flavor: "nope" }), "t")).toThrow(
             /flavor/,
         );
+    });
+});
+
+describe("mergeSettings", () => {
+    it("layers saved data over the defaults", () => {
+        const have = mergeSettings({ site: "ex", margin: 80 });
+        expect(have.site).toBe("ex");
+        expect(have.margin).toBe(80);
+        expect(have.flavor).toBe(DEFAULT_SETTINGS.flavor);
+    });
+
+    it("reads a file without schemaVersion as version 1", () => {
+        expect(mergeSettings({ site: "ex" }).schemaVersion).toBe(1);
+    });
+
+    it("returns the defaults for a non-object", () => {
+        expect(mergeSettings(null)).toEqual({
+            ...DEFAULT_SETTINGS,
+            schemaVersion: 1,
+        });
+        expect(mergeSettings([1])).toEqual({
+            ...DEFAULT_SETTINGS,
+            schemaVersion: 1,
+        });
+    });
+});
+
+describe("parseSettings", () => {
+    it("accepts every version up to the supported one", () => {
+        for (let v = 1; v <= SETTINGS_SCHEMA_VERSION; v++) {
+            expect(parseSettings({ schemaVersion: v }).schemaVersion).toBe(v);
+        }
+    });
+
+    it("accepts a file without schemaVersion", () => {
+        expect(parseSettings({}).schemaVersion).toBe(1);
+    });
+
+    it("refuses a newer schema version", () => {
+        expect(() =>
+            parseSettings({ schemaVersion: SETTINGS_SCHEMA_VERSION + 1 }),
+        ).toThrow(SettingsVersionError);
+    });
+
+    it("refuses an invalid schema version", () => {
+        for (const v of [0, -1, 1.5, "1", null]) {
+            expect(() => parseSettings({ schemaVersion: v })).toThrow(
+                /invalid schemaVersion/,
+            );
+        }
     });
 });

@@ -8,29 +8,39 @@
 // carries the credential. Only methods on the injected `plugin` are used, so this
 // module needs no Obsidian value import and is testable with a fake.
 
+import {
+    type cfsyncSettings,
+    mergeSettings,
+    SETTINGS_SCHEMA_VERSION,
+} from "@cfsync/core";
 import type { Plugin } from "obsidian";
-
-import { type cfsyncSettings, DEFAULT_SETTINGS } from "./model.ts";
 
 /** TOKEN_KEY is the per-vault localStorage key the API token is stored under. */
 export const TOKEN_KEY = "cfsync-token";
 
 /**
  * loadSettings reads the persisted settings from `data.json` and layers them over
- * {@link DEFAULT_SETTINGS}, so a partial or absent file still yields a complete,
- * valid settings object (new fields added in later versions default cleanly).
+ * the defaults (see `mergeSettings`), so a partial or absent file still yields a
+ * complete, valid settings object (new fields added in later versions default
+ * cleanly).
  */
 export async function loadSettings(plugin: Plugin): Promise<cfsyncSettings> {
-    const data = (await plugin.loadData()) as Partial<cfsyncSettings> | null;
-    return { ...DEFAULT_SETTINGS, ...(data ?? {}) };
+    return mergeSettings(await plugin.loadData());
 }
 
-/** saveSettings writes the settings to `data.json`. The token is not included. */
+/**
+ * saveSettings writes the settings to `data.json`, stamped with the current
+ * {@link SETTINGS_SCHEMA_VERSION} so a file written before the field existed
+ * gains it. The token is not included.
+ */
 export async function saveSettings(
     plugin: Plugin,
     settings: cfsyncSettings,
 ): Promise<void> {
-    await plugin.saveData(settings);
+    await plugin.saveData({
+        ...settings,
+        schemaVersion: SETTINGS_SCHEMA_VERSION,
+    });
 }
 
 /** loadToken reads the API token from per-vault localStorage, or `""` when unset. */

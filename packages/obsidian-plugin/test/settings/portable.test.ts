@@ -10,6 +10,7 @@ import {
 import {
     applyImportedMaps,
     expandTilde,
+    isInVault,
     PORTABLE_FILE,
     resolvePortablePath,
     toPortableConfig,
@@ -171,5 +172,30 @@ describe("applyImportedMaps", () => {
         expect(next.timeoutSeconds).toBe(45);
         expect(next.site).toBe("acme");
         expect(next.account).toBe("me@ex.com");
+    });
+});
+
+describe("isInVault", () => {
+    it("treats a relative path as inside the vault", () => {
+        expect(isInVault("notes/.cfsync.yaml", "/v")).toBe(true);
+        expect(isInVault(".cfsync.yaml", "")).toBe(true);
+    });
+
+    it("detects an absolute path under the vault root", () => {
+        expect(isInVault("/v/.cfsync.yaml", "/v")).toBe(true);
+        expect(isInVault("/v/a/", "/v/")).toBe(true);
+        expect(isInVault("/v", "/v")).toBe(true);
+    });
+
+    it("keeps an absolute path outside the vault outside", () => {
+        expect(isInVault("/vault2/.cfsync.yaml", "/v")).toBe(false);
+        expect(isInVault("/home/me/.cfsync.yaml", "/v")).toBe(false);
+        expect(isInVault("/v/../w/.cfsync.yaml", "/v")).toBe(false);
+        expect(isInVault("/v/.cfsync.yaml", "")).toBe(false);
+    });
+
+    it("handles Windows paths", () => {
+        expect(isInVault("c:\\Vault\\a.yaml", "C:\\Vault")).toBe(true);
+        expect(isInVault("D:/Vault/a.yaml", "C:\\Vault")).toBe(false);
     });
 });

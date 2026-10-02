@@ -17,6 +17,7 @@ import { describe, expect, it } from "vitest";
 import { parse as parseYaml } from "yaml";
 import { StubHttpClient } from "../../core/test/support/http-stub.ts";
 import { MemFS } from "../../core/test/support/memfs.ts";
+import { MemLock } from "../../core/test/support/memlock.ts";
 import { NodeEnv } from "../src/adapters/env.ts";
 import { EXIT_ERR, EXIT_OK, type MainCtx, main } from "../src/main.ts";
 import { VERSION } from "../src/version.ts";
@@ -56,6 +57,7 @@ function ctxFor(
         isTTY: false,
         ask: () => Promise.resolve(""),
         yaml: { parse: parseYaml },
+        lock: new MemLock(),
         ...(http ? { httpClient: http } : {}),
     };
     return { ctx, streams };
@@ -222,6 +224,42 @@ describe("offline commands", () => {
         );
         expect(await main(ctx)).toBe(EXIT_OK);
         expect(streams.outText()).toBe("cfsync: everything up to date\n");
+    });
+});
+
+describe("run lock", () => {
+    it("refuses a command while another live run holds the lock", async () => {
+        const fs = await withConfig("pages: {}\n");
+        const { ctx, streams } = ctxFor(
+            ["status", ...CONFIG_ARG],
+            fs,
+            secretsEnv("/w"),
+        );
+        const lock = new MemLock();
+        lock.alive.add(9);
+        const holder = {
+            pid: 9,
+            tool: "plugin",
+            command: "pull",
+            startedAt: "2026-10-02T10:00:00Z",
+        };
+        lock.files.set("/w/.adf_cache/cfsync.lock", JSON.stringify(holder));
+        ctx.lock = lock;
+
+        expect(await main(ctx)).toBe(EXIT_ERR);
+        expect(streams.errText()).toContain(
+            "busy: cfsync plugin pull, pid 9 is running",
+        );
+    });
+
+    it("releases the lock when the command finishes", async () => {
+        const fs = await withConfig("pages: {}\n");
+        const { ctx } = ctxFor(["status", ...CONFIG_ARG], fs, secretsEnv("/w"));
+        const lock = new MemLock();
+        ctx.lock = lock;
+
+        expect(await main(ctx)).toBe(EXIT_OK);
+        expect(lock.files.size).toBe(0);
     });
 });
 

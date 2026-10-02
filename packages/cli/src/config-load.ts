@@ -62,10 +62,12 @@ export interface RuntimeDirs {
 /**
  * runtimeDirs derives the ADF cache, assets, and link-index paths a run needs from
  * a resolved {@link Config}. They are fixed sub-paths of the sync root, so every
- * command computes them the same way.
+ * command computes them the same way — except in vault mode, where `cacheDir`
+ * names the Obsidian plugin's out-of-vault cache home and the cache and link
+ * index live there instead.
  */
-export function runtimeDirs(config: Config): RuntimeDirs {
-    const cacheDir = posixJoin(config.syncRoot, CACHE_DIR);
+export function runtimeDirs(config: Config, cacheDir = ""): RuntimeDirs {
+    cacheDir ||= posixJoin(config.syncRoot, CACHE_DIR);
     return {
         cacheDir,
         assetsDir: posixJoin(config.syncRoot, ASSETS_DIR),

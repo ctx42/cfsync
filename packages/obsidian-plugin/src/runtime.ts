@@ -14,7 +14,9 @@ import {
     type Config,
     ConfluenceClient,
     type FileSystem,
+    lockPath,
     siteHost,
+    withRunLock,
     type Yaml,
 } from "@cfsync/core";
 import { type App, FileSystemAdapter, parseYaml, requestUrl } from "obsidian";
@@ -22,6 +24,7 @@ import { NodeFileSystem } from "./adapters/fs-node.ts";
 import { SplitFileSystem } from "./adapters/fs-split.ts";
 import { VaultFileSystem } from "./adapters/fs-vault.ts";
 import { RequestUrlHttpClient } from "./adapters/http.ts";
+import { NodeLockIO } from "./adapters/lock.ts";
 import { cacheHome } from "./cache-home.ts";
 import { type RuntimeDirs, runtimeDirs } from "./runtime-dirs.ts";
 import { buildPluginConfig, type cfsyncSettings } from "./settings/model.ts";
@@ -42,6 +45,12 @@ export interface PluginRuntime {
     config: Config;
     dirs: RuntimeDirs;
     mintLocalId: () => string;
+    /**
+     * withLock runs `fn` under the run lock in the cache home, so a plugin run
+     * never interleaves with a CLI run over the same cache; a held lock throws
+     * `RunLockError`. Unlocked when the cache lives in the vault (no disk path).
+     */
+    withLock<T>(command: string, fn: () => Promise<T>): Promise<T>;
 }
 
 /**
@@ -72,6 +81,20 @@ export function buildRuntime(
         config,
         dirs: runtimeDirs(config, cacheRoot),
         mintLocalId: () => randomUUID(),
+        withLock: (command, fn) =>
+            cacheRoot === ""
+                ? fn()
+                : withRunLock(
+                      new NodeLockIO(),
+                      lockPath(cacheRoot),
+                      {
+                          pid: process.pid,
+                          tool: "plugin",
+                          command,
+                          startedAt: new Date().toISOString(),
+                      },
+                      fn,
+                  ),
     };
 }
 
@@ -80,7 +103,7 @@ export function buildRuntime(
  * vault, or `""` to keep the legacy in-vault layout when the vault path is not
  * available on disk (only possible off desktop; the plugin is desktop-only).
  */
-function resolveCacheRoot(app: App): string {
+export function resolveCacheRoot(app: App): string {
     const adapter = app.vault.adapter;
     if (!(adapter instanceof FileSystemAdapter)) {
         return "";

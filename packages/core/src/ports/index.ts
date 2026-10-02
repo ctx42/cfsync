@@ -9,6 +9,7 @@ export type { Env } from "./env.ts";
 export type { FileStat, FileSystem } from "./fs.ts";
 export type { HttpClient, HttpRequest, HttpResponse } from "./http.ts";
 export { responseText } from "./http.ts";
+export type { LockIO } from "./lock.ts";
 export {
     NoopReporter,
     PlainReporter,

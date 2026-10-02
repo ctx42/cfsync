@@ -96,6 +96,14 @@
     font-weight: var(--font-bold);
     letter-spacing: 0.01em;
 }
+.cfsync-stale {
+    margin-bottom: var(--size-4-2);
+    padding: var(--size-4-1) var(--size-4-2);
+    border-radius: var(--radius-s);
+    background: var(--background-modifier-error);
+    color: var(--text-on-accent);
+}
+
 .cfsync-sub,
 .cfsync-hint {
     color: var(--text-muted);

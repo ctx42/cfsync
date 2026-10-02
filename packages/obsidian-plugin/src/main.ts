@@ -1,17 +1,22 @@
 // SPDX-FileCopyrightText: (c) 2026 Rafal Zajac
 // SPDX-License-Identifier: MIT
 
-import { PACKAGE_NAME } from "@cfsync/core";
+import { hostname } from "node:os";
+import { PACKAGE_NAME, posixJoin } from "@cfsync/core";
 import {
+    FileSystemAdapter,
     MarkdownView,
     type Menu,
+    Notice,
     Plugin,
     type TAbstractFile,
     TFile,
 } from "obsidian";
 
+import { loadDeviceToken, writePointer, writeToken } from "./device-state.ts";
 import { indentViewPlugin } from "./render/indent-livepreview.ts";
 import { indentPostProcessor } from "./render/indent-reading.ts";
+import { resolveCacheRoot } from "./runtime.ts";
 import { type cfsyncSettings, DEFAULT_SETTINGS } from "./settings/model.ts";
 import {
     loadSettings,
@@ -33,17 +38,23 @@ const NOTE_ITEMS: Record<NoteAction, [string, string, boolean]> = {
 
 /**
  * cfsyncPlugin is the Obsidian plugin entry point. It loads the shareable
- * settings (`data.json`) and the per-device API token (localStorage) on start,
- * registers the settings tab, and keeps both in memory for the settings UI (and,
- * later, the pull/push commands) to read. The indent renderers register as before.
+ * settings (`data.json`) and the per-device API token (a file in the out-of-vault
+ * cache home, migrated from localStorage) on start, records this device's pointer
+ * to that cache home for the CLI, registers the settings tab, and keeps settings
+ * and token in memory for the settings UI and the pull/push commands to read. The
+ * indent renderers register as before.
  */
 export default class cfsyncPlugin extends Plugin {
     override settings: cfsyncSettings = { ...DEFAULT_SETTINGS };
     token = "";
+    /** The out-of-vault cache home, or `""` when the vault has no disk path. */
+    cacheRoot = "";
 
     override async onload(): Promise<void> {
         this.settings = await loadSettings(this);
-        this.token = loadToken(this);
+        this.cacheRoot = resolveCacheRoot(this.app);
+        this.token = await this.loadToken();
+        void this.recordPointer();
 
         this.addSettingTab(new cfsyncSettingTab(this.app, this));
         this.registerEditorExtension(indentViewPlugin);
@@ -121,9 +132,57 @@ export default class cfsyncPlugin extends Plugin {
         await saveSettings(this, this.settings);
     }
 
-    /** persistToken writes the current API token to per-device localStorage. */
+    /**
+     * persistToken writes the current API token to the per-device token file in
+     * the cache home (localStorage when the vault has no disk path). A failed
+     * write is reported as a notice.
+     */
     persistToken(): void {
-        saveToken(this, this.token);
+        if (this.cacheRoot === "") {
+            saveToken(this, this.token);
+            return;
+        }
+        writeToken(this.cacheRoot, this.token).catch((err: unknown) => {
+            console.error("cfsync: saving the API token failed", err);
+            new Notice("cfsync: saving the API token failed; see the console.");
+        });
+    }
+
+    /** loadToken reads the API token, migrating one left in localStorage. */
+    private loadToken(): Promise<string> {
+        if (this.cacheRoot === "") {
+            return Promise.resolve(loadToken(this));
+        }
+        return loadDeviceToken(this.cacheRoot, {
+            load: () => loadToken(this),
+            clear: () => saveToken(this, ""),
+        });
+    }
+
+    /**
+     * recordPointer writes this device's pointer to the cache home into the plugin
+     * folder, so a CLI run inside the vault shares the plugin's cache and token.
+     * Best effort: a failure is logged, and the CLI then refuses to run here.
+     */
+    private async recordPointer(): Promise<void> {
+        const adapter = this.app.vault.adapter;
+        if (this.cacheRoot === "" || !(adapter instanceof FileSystemAdapter)) {
+            return;
+        }
+        const vaultPath = adapter.getBasePath();
+        const dir =
+            this.manifest.dir ??
+            `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
+        try {
+            await writePointer(
+                posixJoin(vaultPath.replace(/\\/g, "/"), dir),
+                hostname(),
+                vaultPath,
+                this.cacheRoot,
+            );
+        } catch (err) {
+            console.error("cfsync: writing the device pointer failed", err);
+        }
     }
 
     /** activateView reveals the control-center panel in the right sidebar. */

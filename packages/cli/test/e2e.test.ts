@@ -86,6 +86,7 @@ async function run(
         isTTY: false,
         ask: () => Promise.resolve(""),
         yaml: { parse: parseYaml },
+        cwd: dir,
     });
     return { code, out: streams.outText(), err: streams.errText() };
 }

@@ -13,6 +13,7 @@ import { homedir } from "node:os";
 import { ConfluenceClient, flavorIds, posixDir, siteHost } from "@cfsync/core";
 import {
     type App,
+    FileSystemAdapter,
     Notice,
     PluginSettingTab,
     parseYaml,
@@ -23,12 +24,14 @@ import {
 } from "obsidian";
 import { RequestUrlHttpClient } from "../adapters/http.ts";
 import type cfsyncPlugin from "../main.ts";
+import { confirmModal } from "../ui/confirm.ts";
 import { type Debounced, debounce } from "./debounce.ts";
 import { confirmOverwrite, promptVaultPath } from "./dialogs.ts";
 import { buildPluginConfig } from "./model.ts";
 import {
     applyImportedMaps,
     expandTilde,
+    isInVault,
     resolvePortablePath,
     toPortableConfig,
 } from "./portable.ts";
@@ -448,8 +451,9 @@ export class cfsyncSettingTab extends PluginSettingTab {
      * shareable config as `.cfsync.yaml`.
      * The target's containing folder must already exist — export never creates
      * directories, so a path into a missing folder is rejected. An existing target
-     * file is overwritten only after confirmation. Any failure surfaces as a Notice
-     * rather than throwing.
+     * file is overwritten only after confirmation. A target inside the vault needs
+     * confirmation too: the CLI refuses to run from a vault folder holding a
+     * `.cfsync.yaml`. Any failure surfaces as a Notice rather than throwing.
      */
     private async exportPortable(): Promise<void> {
         const input = await promptVaultPath(this.app, {
@@ -473,6 +477,20 @@ export class cfsyncSettingTab extends PluginSettingTab {
                 (await statPath(this.app, dir))?.type !== "folder"
             ) {
                 new Notice(`cfsync: no such folder: ${dir}`);
+                return;
+            }
+            if (
+                isInVault(path, vaultBasePath(this.app)) &&
+                !(await confirmModal(
+                    this.app,
+                    "Export inside the vault?",
+                    "Inside a vault the cfsync CLI reads this plugin's " +
+                        "settings, so it will refuse to run from this folder " +
+                        "while this file exists:",
+                    [path],
+                    "Export",
+                ))
+            ) {
                 return;
             }
             if ((await statPath(this.app, path)) !== null) {
@@ -556,4 +574,10 @@ export class cfsyncSettingTab extends PluginSettingTab {
             status.setText(` Failed: ${errorMessage(err)}`);
         }
     }
+}
+
+/** vaultBasePath returns the vault's absolute disk path, or `""` when it has none. */
+function vaultBasePath(app: App): string {
+    const adapter = app.vault.adapter;
+    return adapter instanceof FileSystemAdapter ? adapter.getBasePath() : "";
 }

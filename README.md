@@ -352,8 +352,40 @@ Not every file under a mapped root is synced. `cfsync` skips:
 The plugin keeps the equivalent settings in its **Settings → cfsync** tab: the
 connection fields and Markdown options (flavor, wrap margin, request timeout,
 and a vault-relative sync-root subfolder), plus the same page/folder/space
-maps. The API token is stored per-device; everything else lives in the vault's
-shareable plugin data.
+maps. The API token is stored per-device, outside the vault; everything else
+lives in the vault's shareable plugin data (`data.json`).
+
+### Inside an Obsidian vault
+
+Run from inside a vault that has the cfsync plugin, the CLI needs no
+`.cfsync.yaml` or `.env`: it uses the plugin's configuration, so the two can
+never drift apart, and it shares the plugin's cache, so a note pulled in
+Obsidian can be pushed from the terminal and the other way round.
+
+- **Detection** — the CLI walks up from the working directory; the first folder
+  holding `.obsidian/plugins/cfsync/data.json` is the vault. Every run there
+  prints `config: vault <path> (cfsync plugin, schema vN)` on stderr. A vault
+  whose Obsidian config folder is renamed (not `.obsidian`) is not detected, and
+  the CLI falls back to `.cfsync.yaml`.
+- **One source of config** — inside a vault, `--config`, `--env`, `--sync-root`,
+  and a `.cfsync.yaml` in the working directory are errors. `CFSYNC_*`
+  variables and a default `.env` are ignored, with a warning naming them. The
+  sync root is the plugin's sync-root subfolder (or the vault), whichever
+  folder you run from.
+- **Cache and token** — the plugin keeps its ADF cache, link index, and API
+  token outside the vault, in the per-user cache directory, and records where in
+  a per-device file under `.obsidian/plugins/cfsync/devices/`. If that file is
+  missing or was written on another device, the CLI refuses to run: open the
+  vault in Obsidian on this device once, with the plugin enabled.
+- **One run at a time** — the CLI and the plugin take a lock in the shared cache
+  for every operation. While one runs, the other refuses and names it (`busy:
+  cfsync CLI pull, pid 4242`); the plugin's panel keeps its last result,
+  marked stale. A lock left by a crashed process is cleared automatically.
+- **Versions** — the plugin's `data.json` carries a schema version. A CLI older
+  than the plugin that wrote it refuses to run and asks to be upgraded.
+
+Exporting a `.cfsync.yaml` into the vault from the plugin asks for confirmation
+first, since the CLI then refuses to run from that folder.
 
 ## Markdown dialect
 

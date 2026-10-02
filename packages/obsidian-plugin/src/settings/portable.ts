@@ -8,7 +8,7 @@
 // never part of the portable object, matching the keys the CLI/core forbid in the
 // shared config.
 
-import { posixJoin } from "@cfsync/core";
+import { isAbsPosix, posixClean, posixJoin } from "@cfsync/core";
 import type { cfsyncSettings } from "./model.ts";
 
 /** The portable config file's name, matching the CLI's `CONFIG_FILE`. */
@@ -74,6 +74,31 @@ export function resolvePortablePath(input: string, isFolder: boolean): string {
         return posixJoin(trimmed, PORTABLE_FILE);
     }
     return trimmed;
+}
+
+/**
+ * isInVault reports whether the export target `path` lies inside the vault at
+ * the absolute `vaultBase`: a relative path is vault-relative and always inside;
+ * an absolute one is inside when it is the vault root or under it. Backslashes
+ * count as separators, and a Windows drive letter compares case-insensitively.
+ * An empty `vaultBase` (no disk path) treats only relative paths as inside.
+ */
+export function isInVault(path: string, vaultBase: string): boolean {
+    const norm = (p: string): string =>
+        posixClean(p.trim().replace(/\\/g, "/")).replace(
+            /^([A-Za-z]):/,
+            (_, d: string) => `${d.toLowerCase()}:`,
+        );
+    const target = norm(path);
+    const absolute = isAbsPosix(target) || /^[a-z]:\//.test(target);
+    if (!absolute) {
+        return true;
+    }
+    if (vaultBase === "") {
+        return false;
+    }
+    const base = norm(vaultBase);
+    return target === base || target.startsWith(`${base.replace(/\/$/, "")}/`);
 }
 
 /** ImportResult is the merged settings plus the count of map entries applied. */

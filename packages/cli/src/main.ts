@@ -10,6 +10,9 @@
 // in through `MainCtx`, so the whole CLI is driven end-to-end in tests.
 
 import { randomUUID } from "node:crypto";
+import { realpath } from "node:fs/promises";
+import { hostname } from "node:os";
+import process from "node:process";
 import { type ParseArgsOptionsConfig, parseArgs } from "node:util";
 import {
     type Clock,
@@ -17,14 +20,19 @@ import {
     ConfluenceClient,
     type FileSystem,
     type HttpClient,
+    type LockIO,
+    lockPath,
     markIgnorePush,
     NoopReporter,
+    posixJoin,
     type Reporter,
     type Streams,
+    withRunLock,
     type Yaml,
 } from "@cfsync/core";
 import type { NodeEnv } from "./adapters/env.ts";
 import { FetchHttpClient } from "./adapters/http.ts";
+import { NodeLockIO } from "./adapters/lock.ts";
 import { bunYaml } from "./adapters/yaml.ts";
 import {
     type CliDeps,
@@ -37,15 +45,22 @@ import {
     runTest,
 } from "./commands.ts";
 import {
+    CONFIG_FILE,
+    ENV_ACCOUNT,
+    ENV_FILE,
+    ENV_SITE,
     ENV_SYNC_ROOT,
+    ENV_TOKEN,
     envFilePath,
     loadConfig,
     loadEnvFile,
+    type RuntimeDirs,
     runtimeDirs,
 } from "./config-load.ts";
 import { confirmCreates, confirmOverwrite, confirmStale } from "./prompt.ts";
 import { newReporter } from "./reporter.ts";
 import { type KeySource, runSelect } from "./select.ts";
+import { findVault, loadVaultConfig, type VaultHost } from "./vault.ts";
 import { VERSION } from "./version.ts";
 
 /** Process exit codes. */
@@ -89,6 +104,20 @@ export interface MainCtx {
      * where the compiled binary parses with Bun's built-in `Bun.YAML`.
      */
     yaml?: Yaml;
+    /**
+     * The run lock's I/O — injected by tests over an in-memory filesystem.
+     * Omitted in production, where {@link NodeLockIO} is used.
+     */
+    lock?: LockIO;
+    /** The process id recorded in the run lock; defaults to `process.pid`. */
+    pid?: number;
+    /**
+     * The absolute working directory vault detection walks up from; defaults to
+     * `process.cwd()`.
+     */
+    cwd?: string;
+    /** Vault mode's device name and realpath; defaults to the real ones. */
+    vaultHost?: VaultHost;
 }
 
 /**
@@ -157,13 +186,23 @@ async function runConfigCommand(
     const yaml = ctx.yaml ?? bunYaml;
 
     let config: Config;
+    let dirs: RuntimeDirs;
     try {
-        if (flags.syncRoot !== "") {
-            ctx.env.set(ENV_SYNC_ROOT, flags.syncRoot);
+        const cwd = ctx.cwd ?? process.cwd().replace(/\\/g, "/");
+        const vault = await findVault(ctx.fs, cwd);
+        if (vault !== null) {
+            const vc = await loadVaultMode(ctx, flags, cwd, vault);
+            config = vc.config;
+            dirs = runtimeDirs(config, vc.cacheDir);
+        } else {
+            if (flags.syncRoot !== "") {
+                ctx.env.set(ENV_SYNC_ROOT, flags.syncRoot);
+            }
+            const envFile = envFilePath(flags.config, flags.env);
+            await loadEnvFile(ctx.fs, ctx.env, envFile.path, envFile.explicit);
+            config = await loadConfig(ctx.fs, ctx.env, yaml, flags.config);
+            dirs = runtimeDirs(config);
         }
-        const envFile = envFilePath(flags.config, flags.env);
-        await loadEnvFile(ctx.fs, ctx.env, envFile.path, envFile.explicit);
-        config = await loadConfig(ctx.fs, ctx.env, yaml, flags.config);
     } catch (err) {
         return report(ctx, { out: "", error: asError(err) });
     }
@@ -190,19 +229,98 @@ async function runConfigCommand(
         yaml,
         config,
         reporter,
-        dirs: runtimeDirs(config),
+        dirs,
         mintLocalId: () => randomUUID(),
     };
 
     let result: CommandResult;
     try {
-        result = await runCommand(ctx, cmd, deps, flags);
+        result = await withRunLockFor(ctx, cmd, deps, () =>
+            runCommand(ctx, cmd, deps, flags),
+        );
     } catch (err) {
         result = { out: "", error: asError(err) };
     } finally {
         reporter.finish();
     }
     return report(ctx, result);
+}
+
+/**
+ * withRunLockFor runs `fn` under the run lock in the cache directory, so a CLI
+ * run never interleaves with another run — the plugin's, inside a vault — over
+ * the same cache. `test` touches no cache and runs unlocked.
+ */
+function withRunLockFor<T>(
+    ctx: MainCtx,
+    cmd: ConfigCommand,
+    deps: CliDeps,
+    fn: () => Promise<T>,
+): Promise<T> {
+    if (cmd === "test") {
+        return fn();
+    }
+    return withRunLock(
+        ctx.lock ?? new NodeLockIO(),
+        lockPath(deps.dirs.cacheDir),
+        {
+            pid: ctx.pid ?? process.pid,
+            tool: "cli",
+            command: cmd,
+            startedAt: ctx.clock().toISOString(),
+        },
+        fn,
+    );
+}
+
+/** The variables vault mode ignores, with a warning, when they are set. */
+const VAULT_IGNORED_ENV = [ENV_SITE, ENV_ACCOUNT, ENV_TOKEN, ENV_SYNC_ROOT];
+
+/**
+ * loadVaultMode loads the config of the Obsidian vault at `vault` (see
+ * vault.ts). Inside a vault the plugin's settings are the only config: an
+ * explicit `--config`, `--env`, or `--sync-root`, or a `.cfsync.yaml` in the
+ * working directory, is an error, while `CFSYNC_*` variables and a default
+ * `.env` are ignored with one warning naming them. On success it reports the
+ * config source on stderr.
+ */
+async function loadVaultMode(
+    ctx: MainCtx,
+    flags: ConfigFlags,
+    cwd: string,
+    vault: string,
+): Promise<{ config: Config; cacheDir: string }> {
+    const conflict = (what: string): Error =>
+        new Error(
+            `${what} cannot be used inside an Obsidian vault (${vault}); the ` +
+                "cfsync plugin's settings are the config there",
+        );
+    if (flags.config !== "") throw conflict("--config");
+    if (flags.env !== "") throw conflict("--env");
+    if (flags.syncRoot !== "") throw conflict("--sync-root");
+    const yamlPath = posixJoin(cwd, CONFIG_FILE);
+    if (await ctx.fs.exists(yamlPath)) throw conflict(yamlPath);
+
+    const ignored = VAULT_IGNORED_ENV.filter((k) => ctx.env.get(k) !== "");
+    if (await ctx.fs.exists(posixJoin(cwd, ENV_FILE))) {
+        ignored.push(ENV_FILE);
+    }
+    if (ignored.length > 0) {
+        ctx.streams.stderr.write(
+            `cfsync: warning: ignoring ${ignored.join(", ")} inside an ` +
+                "Obsidian vault; the cfsync plugin's settings are used\n",
+        );
+    }
+
+    const vc = await loadVaultConfig(
+        ctx.fs,
+        ctx.vaultHost ?? { device: hostname(), realpath: (p) => realpath(p) },
+        vault,
+    );
+    ctx.streams.stderr.write(
+        `config: vault ${vault} (cfsync plugin, schema v${vc.schemaVersion})\n`,
+    );
+    return { config: vc.config, cacheDir: vc.cacheDir };
 }
 
 /** runCommand dispatches to the selected command's orchestration. */
@@ -427,6 +545,10 @@ const USAGE =
     "  clean     Remove local files no longer in Confluence.\n" +
     "  version   Print the program version.\n" +
     "  help      Print this help, or help for a command.\n" +
+    "\n" +
+    "Inside an Obsidian vault with the cfsync plugin, the plugin's settings are\n" +
+    "the config: --config, --env, --sync-root, and a .cfsync.yaml in the working\n" +
+    "directory are refused there, and CFSYNC_* variables are ignored.\n" +
     "\n" +
     'Run "cfsync help <command>" for a command\'s details and flags.\n';
 

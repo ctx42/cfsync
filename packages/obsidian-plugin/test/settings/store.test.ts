@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: (c) 2026 Rafal Zajac
 // SPDX-License-Identifier: MIT
 
+import { SETTINGS_SCHEMA_VERSION } from "@cfsync/core";
 import type { Plugin } from "obsidian";
 import { describe, expect, it } from "vitest";
-
 import { DEFAULT_SETTINGS } from "../../src/settings/model.ts";
 import {
     loadSettings,
@@ -54,6 +54,14 @@ describe("settings store", () => {
         const plugin = fakePlugin();
         await saveSettings(plugin, { ...DEFAULT_SETTINGS, account: "me@x" });
         expect((await loadSettings(plugin)).account).toBe("me@x");
+    });
+
+    it("stamps the schema version on save", async () => {
+        const plugin = fakePlugin({ site: "ex" });
+        const { schemaVersion: _, ...legacy } = DEFAULT_SETTINGS;
+        await saveSettings(plugin, { ...legacy, schemaVersion: 0 });
+        const have = (await plugin.loadData()) as { schemaVersion: number };
+        expect(have.schemaVersion).toBe(SETTINGS_SCHEMA_VERSION);
     });
 
     it("round-trips the token through localStorage", () => {

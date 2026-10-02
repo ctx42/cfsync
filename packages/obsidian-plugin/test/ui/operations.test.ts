@@ -46,6 +46,7 @@ async function runtime(
         config,
         dirs: runtimeDirs(config),
         mintLocalId: () => "id",
+        withLock: (_command, fn) => fn(),
     };
 }
 
