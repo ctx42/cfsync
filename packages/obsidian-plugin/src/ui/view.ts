@@ -14,6 +14,7 @@ import {
     overwrites,
     type PageAction,
     type PreflightEntry,
+    pageName,
     type RowAction,
     rowActions,
     type StatusReport,
@@ -93,14 +94,22 @@ export class cfsyncView extends ItemView {
         this.render(null);
     }
 
-    /** runPull runs a one-click pull for the current scope and streams progress. */
-    async runPull(): Promise<void> {
+    /** idle reports whether a new run may start: none is running and no push
+     * preview is waiting to be resolved. */
+    idle(): boolean {
+        return !this.busy && !this.previewPending;
+    }
+
+    /** runPull runs a one-click pull for the current scope and streams progress.
+     * A given `dest` pulls that note alone, whatever the scope. */
+    async runPull(dest?: string): Promise<void> {
         if (this.refusePending()) return;
+        if (dest !== undefined) this.opScope = "current";
         await this.run("pulling", async (rt, reporter) => {
             if (this.opScope === "current") {
-                const dest = this.activeDest();
-                if (dest === null) throw new Error("no active note");
-                const action = await pullNote(rt, reporter, dest);
+                const d = dest ?? this.activeDest();
+                if (d === null) throw new Error("no active note");
+                const action = await pullNote(rt, reporter, d);
                 reporter.setTally(singleTally(action), 0);
             } else {
                 const outcome = await pullVault(rt, reporter);
@@ -120,10 +129,32 @@ export class cfsyncView extends ItemView {
         });
     }
 
+    /** runOverwrite rewrites the note at `dest` from Confluence, discarding its
+     * local edits, after the user confirms. */
+    async runOverwrite(dest: string): Promise<void> {
+        if (this.refusePending() || this.busy) return;
+        const name = pageName(this.plugin.settings.syncRoot, dest);
+        const yes = await confirmModal(
+            this.app,
+            "Overwrite from Confluence?",
+            "The local edits in this note will be discarded:",
+            [name],
+            "Overwrite",
+        );
+        if (!yes) return;
+        this.opScope = "current";
+        await this.run("overwriting", async (rt, reporter) => {
+            const action = await pullNote(rt, reporter, dest, true);
+            reporter.setTally(singleTally(action), 0);
+        });
+    }
+
     /** runPush pre-flights (guarded), shows the selectable preview, then pushes
-     * the chosen notes under a fresh guarded run. */
-    async runPush(): Promise<void> {
+     * the chosen notes under a fresh guarded run. A given `dest` pushes that
+     * note alone, whatever the scope. */
+    async runPush(dest?: string): Promise<void> {
         if (this.refusePending()) return;
+        if (dest !== undefined) this.opScope = "current";
         if (this.busy) return;
         this.busy = true;
         this.render(null); // disable the header buttons during pre-flight
@@ -134,7 +165,11 @@ export class cfsyncView extends ItemView {
                 this.plugin.settings,
                 this.plugin.token,
             );
-            entries = await preflight(rt, this.opScope, this.activeDest());
+            entries = await preflight(
+                rt,
+                this.opScope,
+                dest ?? this.activeDest(),
+            );
         } catch (err) {
             new Notice(`cfsync: ${message(err)}`);
             this.busy = false;

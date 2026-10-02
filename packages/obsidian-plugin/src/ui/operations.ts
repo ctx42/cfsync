@@ -60,7 +60,9 @@ export function pullVault(
 }
 
 /**
- * pullNote pulls the single managed page at `dest` (an active-note dest). It
+ * pullNote pulls the single managed page at `dest` (an active-note dest);
+ * with `overwrite` it discards local edits and rewrites the note from
+ * Confluence instead of merging. It
  * streams progress through `reporter`; a failure throws rather than returning a
  * per-page outcome, since the view's `guarded()` catches it and there is no
  * batch to fold the result into. Returns the page's pull action.
@@ -69,6 +71,7 @@ export async function pullNote(
     rt: PluginRuntime,
     reporter: Reporter,
     dest: string,
+    overwrite = false,
 ): Promise<PageAction> {
     // Announce the one page up front so the reporter sits in its processing
     // phase throughout — any on-demand root discovery inside resolvePageSource
@@ -95,6 +98,7 @@ export async function pullNote(
         assetsDir: rt.dirs.assetsDir,
         links,
         flavor: resolveFlavor(rt.config.flavor),
+        overwrite,
     });
     const { state, action, version } = await puller.pullOne(
         dest,

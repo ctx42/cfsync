@@ -2,7 +2,13 @@
 // SPDX-License-Identifier: MIT
 
 import { PACKAGE_NAME } from "@cfsync/core";
-import { Plugin } from "obsidian";
+import {
+    MarkdownView,
+    type Menu,
+    Plugin,
+    type TAbstractFile,
+    TFile,
+} from "obsidian";
 
 import { indentViewPlugin } from "./render/indent-livepreview.ts";
 import { indentPostProcessor } from "./render/indent-reading.ts";
@@ -14,7 +20,16 @@ import {
     saveToken,
 } from "./settings/store.ts";
 import { cfsyncSettingTab } from "./settings/tab.ts";
+import { type NoteAction, noteActions } from "./ui/note-actions.ts";
+import { toDest } from "./ui/operations.ts";
 import { cfsyncView, VIEW_TYPE } from "./ui/view.ts";
+
+/** NOTE_ITEMS are the tab-header menu items: label, icon, warning styling. */
+const NOTE_ITEMS: Record<NoteAction, [string, string, boolean]> = {
+    pull: ["Pull from Confluence", "arrow-down", false],
+    push: ["Push to Confluence", "arrow-up", false],
+    overwrite: ["Overwrite from Confluence…", "alert-triangle", true],
+};
 
 /**
  * cfsyncPlugin is the Obsidian plugin entry point. It loads the shareable
@@ -88,6 +103,12 @@ export default class cfsyncPlugin extends Plugin {
             callback: () => void this.runInView((v) => v.runStatus()),
         });
 
+        this.registerEvent(
+            this.app.workspace.on("file-menu", (menu, file, source) =>
+                this.noteMenu(menu, file, source),
+            ),
+        );
+
         console.log(`cfsync: loaded (core=${PACKAGE_NAME})`);
     }
 
@@ -115,6 +136,49 @@ export default class cfsyncPlugin extends Plugin {
         }
         await workspace.revealLeaf(leaf);
         return leaf.view as cfsyncView;
+    }
+
+    /** noteMenu adds the cfsync section (Obsidian separates sections) to a synced note's tab-header context
+     * menu, greyed out while the panel is busy or a push preview is pending. */
+    private noteMenu(menu: Menu, file: TAbstractFile, source: string): void {
+        if (source !== "tab-header" || !(file instanceof TFile)) return;
+        const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
+        const actions = noteActions(fm);
+        if (actions.length === 0) return;
+        const view = this.app.workspace.getLeavesOfType(VIEW_TYPE)[0]?.view;
+        const idle = !(view instanceof cfsyncView) || view.idle();
+        for (const a of actions) {
+            const [title, icon, warning] = NOTE_ITEMS[a];
+            menu.addItem((item) =>
+                item
+                    .setSection("cfsync")
+                    .setTitle(title)
+                    .setIcon(icon)
+                    .setWarning(warning)
+                    .setDisabled(!idle)
+                    .onClick(() => void this.noteAction(a, file)),
+            );
+        }
+    }
+
+    /** noteAction saves `file`'s open editors, then runs `action` on it in the
+     * panel. Saving first keeps a pending autosave from being lost (pull,
+     * push) or from writing stale text over the result (overwrite). */
+    private async noteAction(action: NoteAction, file: TFile): Promise<void> {
+        for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+            const v = leaf.view;
+            if (v instanceof MarkdownView && v.file?.path === file.path) {
+                await v.save();
+            }
+        }
+        const dest = toDest(file.path);
+        await this.runInView((v) =>
+            action === "pull"
+                ? v.runPull(dest)
+                : action === "push"
+                  ? v.runPush(dest)
+                  : v.runOverwrite(dest),
+        );
     }
 
     /** runInView opens the panel and runs `fn` against its view. */
