@@ -1482,8 +1482,10 @@ async function removeNote(
 
 /**
  * moveCacheBase relocates the cached ADF and render of page `oldName` at
- * `version` to `newName`, so a moved note's merge base survives the rename. It
- * is best-effort: a cache entry that is absent is simply skipped.
+ * `version` to `newName`, so a moved note's merge base survives the rename. The
+ * ADF wrapper is rewritten with `newName` as its `name`, so the cache never
+ * names a page by its pre-rename path. It is best-effort: a cache entry that is
+ * absent is simply skipped.
  */
 async function moveCacheBase(
     fs: FileSystem,
@@ -1497,20 +1499,18 @@ async function moveCacheBase(
     }
     const oldJson = posixJoin(cacheDir, cacheFileName(oldName, version));
     const newJson = posixJoin(cacheDir, cacheFileName(newName, version));
-    const pairs: [string, string][] = [
-        [oldJson, newJson],
-        [
-            `${oldJson.slice(0, -".json".length)}.md`,
-            `${newJson.slice(0, -".json".length)}.md`,
-        ],
-    ];
-    for (const [from, to] of pairs) {
-        try {
-            await fs.write(to, await fs.read(from));
-            await fs.remove(from);
-        } catch {
-            // Absent (or unreadable) cache entry: nothing to move.
-        }
+    const page = await readCachedPage(fs, oldJson);
+    if (page !== null) {
+        await writePage(fs, newJson, { ...page, name: newName });
+        await fs.remove(oldJson);
+    }
+    const oldMd = `${oldJson.slice(0, -".json".length)}.md`;
+    const newMd = `${newJson.slice(0, -".json".length)}.md`;
+    try {
+        await fs.write(newMd, await fs.read(oldMd));
+        await fs.remove(oldMd);
+    } catch {
+        // Absent (or unreadable) cache render: nothing to move.
     }
 }
 

@@ -83,6 +83,46 @@ describe("put GetPut (tabular)", () => {
                  "content": [ { "type": "text", "text": "after" } ] } ] } }`,
         },
         {
+            name: "a space-only paragraph is kept verbatim",
+            data: `{ "adf": { "type": "doc", "content": [
+               { "type": "paragraph", "attrs": { "localId": "p1" },
+                 "content": [ { "type": "text", "text": "before" } ] },
+               { "type": "paragraph", "attrs": { "localId": "sp" },
+                 "content": [ { "type": "text", "text": "  " } ] },
+               { "type": "paragraph", "attrs": { "localId": "p2" },
+                 "content": [ { "type": "text", "text": "after" } ] },
+               { "type": "paragraph",
+                 "content": [ { "type": "text", "text": " " } ] } ] } }`,
+        },
+        {
+            name: "a space-led paragraph after a list stays out of the list",
+            data: `{ "adf": { "type": "doc", "content": [
+               { "type": "bulletList", "content": [
+                  { "type": "listItem", "content": [ { "type": "paragraph",
+                    "content": [ { "type": "text", "text": "item" } ] } ] } ] },
+               { "type": "paragraph",
+                 "content": [ { "type": "text", "text": " By default" } ] },
+               { "type": "paragraph",
+                 "content": [ { "type": "text", "text": "after" } ] } ] } }`,
+        },
+        {
+            name: "a same-sized list before a merged run is not cut",
+            data: `{ "adf": { "type": "doc", "content": [
+               { "type": "orderedList", "attrs": { "order": 4 }, "content": [
+                  { "type": "listItem", "content": [ { "type": "paragraph",
+                    "content": [ { "type": "text", "text": "four" } ] } ] },
+                  { "type": "listItem", "content": [ { "type": "paragraph",
+                    "content": [ { "type": "text", "text": "five" } ] } ] } ] },
+               { "type": "paragraph",
+                 "content": [ { "type": "text", "text": "between" } ] },
+               { "type": "orderedList", "attrs": { "order": 6 }, "content": [
+                  { "type": "listItem", "content": [ { "type": "paragraph",
+                    "content": [ { "type": "text", "text": "six" } ] } ] } ] },
+               { "type": "orderedList", "attrs": { "order": 7 }, "content": [
+                  { "type": "listItem", "content": [ { "type": "paragraph",
+                    "content": [ { "type": "text", "text": "seven" } ] } ] } ] } ] } }`,
+        },
+        {
             name: "a table is copied verbatim",
             data: `{ "adf": { "type": "doc", "content": [
                { "type": "paragraph", "attrs": { "localId": "p" },

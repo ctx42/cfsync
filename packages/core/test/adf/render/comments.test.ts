@@ -184,6 +184,33 @@ describe("comment decoration", () => {
         expect(JSON.stringify(rebuilt.doc)).toBe(JSON.stringify(base.doc));
     });
 
+    it("keeps a page's own Comments heading", () => {
+        const page = `{ "adf": { "type": "doc", "content": [
+           { "type": "heading", "attrs": { "level": 2 },
+             "content": [ { "type": "text", "text": "Comments" } ] },
+           { "type": "paragraph",
+             "content": [ { "type": "text", "text": "Type and send." } ] } ] } }`;
+        const footer: CommentThread = {
+            id: "F1",
+            markerRef: "",
+            resolution: "",
+            authorId: "jsmith",
+            createdAt: "2026-07-22T08:00:00Z",
+            body: para("Page note."),
+            replies: [],
+        };
+        const comments: RenderComments = {
+            byMarker: new Map(),
+            trailing: [footer],
+        };
+        const decorated = body(page, comments);
+        const want = body(page, { byMarker: new Map(), trailing: [] });
+
+        const have = stripCommentDecorations(decorated);
+
+        expect(have).toBe(want);
+    });
+
     it("drops an inline comment whose marker is absent from the body (dangling)", () => {
         // Its highlighted text was deleted, so Confluence no longer shows it on the
         // page; the render matches CF and omits it rather than surfacing it in a

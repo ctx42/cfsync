@@ -7,6 +7,7 @@
 // discover.test.ts.
 
 import { describe, expect, it } from "vitest";
+import { readCachedPage, writePage } from "../../src/cache/cache.ts";
 import { buildConfig, type Config } from "../../src/config/config.ts";
 import { ConfluenceClient } from "../../src/confluence/client.ts";
 import { obsidianFlavor } from "../../src/flavor/flavor.ts";
@@ -1519,6 +1520,33 @@ describe("pullConfig (discovery + pull)", () => {
         expect(out.log).toContain("moving docs/old.md -> docs/guide.md");
         expect(await fs.exists("/vault/docs/old.md")).toBe(false);
         expect(await fs.readText("/vault/docs/guide.md")).toContain("hello");
+    });
+
+    it("renames a moved page's cached base to its new path", async () => {
+        const cfg = folderConfig();
+        const stub = folderStub().on("GET", pageURL("7"), {
+            body: pageBody("7", 2),
+        });
+        const fs = new MemFS();
+        await fs.write("/vault/docs/old.md", managedNote("7", 2, "hello"));
+        await writePage(fs, "/data/cache/docs/old.v2.json", {
+            name: "docs/old.md",
+            id: "7",
+            title: "Title",
+            version: 2,
+            spaceId: "9",
+            parentId: "7",
+            spaceKey: "",
+            domain: "",
+            adf: JSON.stringify(paras("hello")),
+        });
+
+        const out = await pullConfigWith(cfg, stub, fs);
+
+        expect(out.errors).toEqual([]);
+        expect(await fs.exists("/data/cache/docs/old.v2.json")).toBe(false);
+        const have = await readCachedPage(fs, "/data/cache/docs/guide.v2.json");
+        expect(have?.name).toBe("docs/guide.md");
     });
 
     it("carries unpushed edits from the stale copy onto the moved page", async () => {

@@ -39,15 +39,54 @@ const adfDoc = {
     ],
 };
 
+/**
+ * trickyDoc holds the constructs whose render does not segment back one block
+ * per node: a space-only paragraph, a space-led paragraph after a list, and a
+ * `Comments` heading that is page content.
+ */
+const trickyDoc = {
+    version: 1,
+    type: "doc",
+    content: [
+        {
+            type: "bulletList",
+            content: [
+                {
+                    type: "listItem",
+                    content: [
+                        {
+                            type: "paragraph",
+                            content: [{ type: "text", text: "item" }],
+                        },
+                    ],
+                },
+            ],
+        },
+        { type: "paragraph", content: [{ type: "text", text: " By default" }] },
+        { type: "paragraph", content: [{ type: "text", text: " " }] },
+        {
+            type: "heading",
+            attrs: { level: 2 },
+            content: [{ type: "text", text: "Comments" }],
+        },
+        { type: "paragraph", content: [{ type: "text", text: "Send it." }] },
+    ],
+};
+
 /** wrapper is the cached `.vN.json` of page `id` named `name` at `version`. */
-function wrapper(name: string, id: string, version: number): string {
+function wrapper(
+    name: string,
+    id: string,
+    version: number,
+    doc: unknown = adfDoc,
+): string {
     return JSON.stringify({
         name,
         id,
         title: "P",
         version,
         space_id: "9",
-        adf: adfDoc,
+        adf: doc,
     });
 }
 
@@ -62,8 +101,9 @@ async function pulled(
     id: string,
     version: number,
     cacheBase = true,
+    doc: unknown = adfDoc,
 ): Promise<string> {
-    const json = wrapper(name, id, version);
+    const json = wrapper(name, id, version, doc);
     const md = obsidianFlavor.render(newADF(json), {
         assets: {},
         links: null,
@@ -180,6 +220,33 @@ describe("pushPreflight", () => {
 
         expect(have[0]?.cls).toBe("unchanged");
     });
+
+    it.each([
+        ["missing", null],
+        ["stale", "---\npage_version: 5\n---\n\nan older render\n"],
+    ])(
+        "treats an untouched note as unchanged with a %s base render",
+        async (_, render) => {
+            const fs = new MemFS();
+            await pulled(fs, "wiki/A.md", "101", 5, true, trickyDoc);
+            const mdBase = `${cacheDir}/wiki/A.v5.md`;
+            if (render === null) {
+                await fs.remove(mdBase);
+            } else {
+                await fs.write(mdBase, render);
+            }
+            const http = new QueueHttpClient().rsp(
+                200,
+                versionsJson(["101", 5]),
+            );
+
+            const have = await pushPreflight(depsOf(http, fs), [
+                "/vault/wiki/A.md",
+            ]);
+
+            expect(have[0]?.cls).toBe("unchanged");
+        },
+    );
 
     it("marks a note a push would refuse refused, with the reason", async () => {
         const fs = new MemFS();

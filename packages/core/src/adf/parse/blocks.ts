@@ -313,46 +313,139 @@ export function isListStart(ln: string): boolean {
 
 /**
  * splitMergedLists splits each user block that {@link segmentBody} merged from
- * several adjacent same-kind lists back into one block per list, following the
- * baseline. Two bullet lists with nothing (or only an empty paragraph, which
- * renders to nothing) between them read as one loose list, so the text alone
- * cannot tell where one ends; the baseline blocks (one per rendered node) can.
- * For each run of two or more adjacent same-kind list blocks in `base`, the
- * first not-yet-split user list of that kind carrying the run's total item
- * count is cut at the same item boundaries. A user block whose item count no
- * longer matches (an item added or removed) is left whole, for the lens to
- * judge as before.
+ * several baseline blocks back into one block per baseline block. The text
+ * alone cannot always tell where a list ends: two bullet lists with nothing (or
+ * only an empty paragraph, which renders to nothing) between them read as one
+ * loose list, and a paragraph whose text starts with spaces reads as a
+ * continuation of the list item before it. The baseline blocks (one per
+ * rendered node) can. A user list whose lines are exactly those of two or more
+ * consecutive baseline blocks (blank lines aside) is cut back into them. An
+ * edited list is cut only along a run of two or more adjacent same-kind
+ * baseline lists: of the lists carrying the run's total item count, the one
+ * sharing the most lines with the run, and at least one, so an unrelated list
+ * of the same size elsewhere in the note is never cut. A user block matching neither (an item added or
+ * removed) is left whole, for the lens to judge as before.
  */
 export function splitMergedLists(user: MdBlock[], base: MdBlock[]): MdBlock[] {
+    const split = splitAtBaseline(user, base);
     const runs = mergedListRuns(base);
     if (runs.length === 0) {
-        return user;
+        return split;
+    }
+    const assigned = new Map<number, ListRun>();
+    for (const run of runs) {
+        let at = -1;
+        let best = 0;
+        for (const [i, blk] of split.entries()) {
+            const first = blk.text.split("\n", 1)[0] ?? "";
+            if (
+                assigned.has(i) ||
+                !isListStart(first) ||
+                listKind(first) !== run.kind ||
+                itemStarts(blk.text, run.kind).length !== total(run.counts)
+            ) {
+                continue;
+            }
+            const shared = contentLines(blk.text).filter((ln) =>
+                run.lines.includes(ln),
+            ).length;
+            if (shared > best) {
+                at = i;
+                best = shared;
+            }
+        }
+        if (at >= 0) {
+            assigned.set(at, run);
+        }
     }
     const out: MdBlock[] = [];
-    for (const blk of user) {
-        const first = blk.text.split("\n", 1)[0] ?? "";
-        const at = isListStart(first)
-            ? runs.findIndex(
-                  (r) =>
-                      r.kind === listKind(first) &&
-                      itemStarts(blk.text, r.kind).length === total(r.counts),
-              )
-            : -1;
-        const run = runs[at];
+    for (const [i, blk] of split.entries()) {
+        const run = assigned.get(i);
         if (run === undefined) {
             out.push(blk);
-            continue;
+        } else {
+            out.push(...cutAtItems(blk, run.kind, run.counts));
         }
-        runs.splice(at, 1);
-        out.push(...cutAtItems(blk, run.kind, run.counts));
     }
     return out;
 }
 
-/** ListRun is a run of adjacent same-kind baseline lists: their item counts. */
+/**
+ * splitAtBaseline cuts each user list block whose non-blank lines are exactly
+ * those of two or more consecutive `base` blocks, the first a list, into one
+ * block per baseline block. A user block equal to a single baseline block, or
+ * covering none exactly, is kept whole.
+ */
+function splitAtBaseline(user: MdBlock[], base: MdBlock[]): MdBlock[] {
+    const baseLines = base.map((b) => contentLines(b.text));
+    const out: MdBlock[] = [];
+    for (const blk of user) {
+        const cover = isListStart(blk.text.split("\n", 1)[0] ?? "")
+            ? baselineCover(contentLines(blk.text), baseLines)
+            : null;
+        if (cover === null) {
+            out.push(blk);
+            continue;
+        }
+        // Map each non-blank line to its raw line, then emit one block per
+        // covered baseline block, from its first to its last non-blank line.
+        const raw = blk.text.split("\n");
+        const rows = raw.flatMap((ln, i) => (isBlankLine(ln) ? [] : [i]));
+        let at = 0;
+        for (const n of cover) {
+            const from = rows[at] ?? 0;
+            const to = rows[at + n - 1] ?? from;
+            out.push(
+                newBlock(raw.slice(from, to + 1).join("\n"), blk.line + from),
+            );
+            at += n;
+        }
+    }
+    return out;
+}
+
+/**
+ * baselineCover returns the line counts of the consecutive baseline blocks
+ * whose lines, in order, are exactly `lines` — two or more of them, the first
+ * starting a list — or null when no such run exists or one block alone equals
+ * `lines`.
+ */
+function baselineCover(lines: string[], base: string[][]): number[] | null {
+    if (base.some((b) => sameLines(b, lines))) {
+        return null;
+    }
+    for (const [j, first] of base.entries()) {
+        if (first.length === 0 || !isListStart(first[0] ?? "")) {
+            continue;
+        }
+        const counts: number[] = [];
+        let pos = 0;
+        for (let k = j; k < base.length && pos < lines.length; k++) {
+            const b = base[k] ?? [];
+            if (
+                b.length === 0 ||
+                !sameLines(b, lines.slice(pos, pos + b.length))
+            ) {
+                break;
+            }
+            counts.push(b.length);
+            pos += b.length;
+        }
+        if (pos === lines.length && counts.length >= 2) {
+            return counts;
+        }
+    }
+    return null;
+}
+
+/**
+ * ListRun is a run of adjacent same-kind baseline lists: their item counts and
+ * their non-blank lines, in order.
+ */
 interface ListRun {
     kind: ListKind;
     counts: number[];
+    lines: string[];
 }
 
 /** mergedListRuns finds the runs of two or more adjacent same-kind lists in `base`. */
@@ -364,6 +457,7 @@ function mergedListRuns(base: MdBlock[]): ListRun[] {
         const kind = isListStart(first) ? listKind(first) : null;
         if (kind !== null && cur !== null && cur.kind === kind) {
             cur.counts.push(itemStarts(b.text, kind).length);
+            cur.lines.push(...contentLines(b.text));
             continue;
         }
         if (cur !== null && cur.counts.length > 1) {
@@ -372,12 +466,26 @@ function mergedListRuns(base: MdBlock[]): ListRun[] {
         cur =
             kind === null
                 ? null
-                : { kind, counts: [itemStarts(b.text, kind).length] };
+                : {
+                      kind,
+                      counts: [itemStarts(b.text, kind).length],
+                      lines: contentLines(b.text),
+                  };
     }
     if (cur !== null && cur.counts.length > 1) {
         runs.push(cur);
     }
     return runs;
+}
+
+/** contentLines returns the non-blank lines of `text`. */
+function contentLines(text: string): string[] {
+    return text.split("\n").filter((ln) => !isBlankLine(ln));
+}
+
+/** sameLines reports whether two line lists are equal. */
+function sameLines(a: string[], b: string[]): boolean {
+    return a.length === b.length && a.every((ln, i) => ln === b[i]);
 }
 
 /** total sums item counts. */

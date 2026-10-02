@@ -14,7 +14,7 @@
 
 import { type ADF, attrStr } from "../../models/adf.ts";
 import type { Links } from "../links.ts";
-import { type MdBlock, newBlock } from "../parse/blocks.ts";
+import { isBlankLine, type MdBlock, newBlock } from "../parse/blocks.ts";
 import { blockComments, trailingComments } from "../render/comments.ts";
 import {
     ambiguousMentions,
@@ -191,6 +191,12 @@ export function marshallMarkdownLinks(
  * paired with the {@link Origin} linking it to the ADF node that produced it. It
  * is the authoritative baseline for a push diff: the block text comes straight
  * from the render and every block carries its source node index and localId.
+ *
+ * A block that renders to blank lines only (a paragraph holding just a space)
+ * is left out, like a node that renders to nothing: {@link segmentBody} reads
+ * its text as a block separator, so the edited body never carries it and a
+ * baseline block would read as deleted. Without an origin the lens keeps the
+ * node verbatim.
  */
 export function baselineBlocks(
     adf: ADF,
@@ -198,8 +204,15 @@ export function baselineBlocks(
     links: Links | null,
 ): [MdBlock[], Origin[]] {
     const [md, sm] = marshallMapped(adf, assets, links);
-    const blocks = sm.origins.map((o) =>
-        newBlock(md.slice(o.span.start, o.span.end)),
-    );
-    return [blocks, sm.origins];
+    const blocks: MdBlock[] = [];
+    const origins: Origin[] = [];
+    for (const o of sm.origins) {
+        const text = md.slice(o.span.start, o.span.end);
+        if (text.split("\n").every(isBlankLine)) {
+            continue;
+        }
+        blocks.push(newBlock(text));
+        origins.push(o);
+    }
+    return [blocks, origins];
 }

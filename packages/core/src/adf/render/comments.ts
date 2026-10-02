@@ -13,7 +13,7 @@
 // reconstruct, so they never reach Confluence (Stage 1 is read-only).
 
 import type { Node } from "../../models/adf.ts";
-import { segmentBody } from "../parse/blocks.ts";
+import { type MdBlock, segmentBody } from "../parse/blocks.ts";
 import {
     annotationIdsOf,
     type CommentThread,
@@ -34,7 +34,8 @@ const COMMENT_REF_RE = /\[\^cf-[^\]]+\]/g;
  * the render's decoration. It drops every `[^cf-…]` anchor ref (each sits at a
  * text-run boundary, so removing it restores the run verbatim) and every
  * top-level `[!comment]` callout block, including the trailing `## Comments`
- * heading and the footer callouts under it. Block segmentation reuses
+ * heading and the footer callouts under it; a `## Comments` heading anywhere
+ * else is page content and stays. Block segmentation reuses
  * {@link segmentBody}, so a fenced code block that happens to contain a blank
  * line or a `> [!comment]` line is kept whole, never mis-split. The surviving
  * blocks re-join with a blank line, matching how the render lays out top-level
@@ -42,21 +43,35 @@ const COMMENT_REF_RE = /\[\^cf-[^\]]+\]/g;
  */
 export function stripCommentDecorations(body: string): string {
     const noRefs = body.replace(COMMENT_REF_RE, "");
-    const kept = segmentBody(noRefs).filter((b) => !isCommentBlock(b.text));
+    const blocks = segmentBody(noRefs);
+    const kept = blocks.filter(
+        (b, i) =>
+            !isCallout(b.text) &&
+            !(isTrailingHeading(b.text) && opensTrailing(blocks, i)),
+    );
     return kept.map((b) => b.text).join("\n\n");
 }
 
-/**
- * isCommentBlock reports whether a segmented top-level block is comment
- * decoration to drop: a `[!comment]` callout (its first line is the blockquote
- * tag) or the bare `## Comments` heading that opens the trailing section.
- */
-function isCommentBlock(text: string): boolean {
+/** isCallout reports whether a top-level block is a `[!comment]` callout. */
+function isCallout(text: string): boolean {
     const first = text.split("\n", 1)[0] ?? "";
-    return (
-        /^>\s*\[!comment\]/i.test(first) ||
-        text.trimEnd() === TRAILING_COMMENTS_HEADING
-    );
+    return /^>\s*\[!comment\]/i.test(first);
+}
+
+/** isTrailingHeading reports whether a block is a bare `## Comments` heading. */
+function isTrailingHeading(text: string): boolean {
+    return text.trimEnd() === TRAILING_COMMENTS_HEADING;
+}
+
+/**
+ * opensTrailing reports whether the `## Comments` heading at `blocks[i]` opens
+ * the trailing comment section: every block after it is a callout, or none
+ * follows (its footer callouts were deleted). A page's own `## Comments`
+ * heading with content after it is kept; one that ends the page cannot be told
+ * from an emptied trailing section and is stripped.
+ */
+function opensTrailing(blocks: MdBlock[], i: number): boolean {
+    return blocks.slice(i + 1).every((b) => isCallout(b.text));
 }
 
 /**
